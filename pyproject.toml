@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tidn"
+version = "0.1.0"
+description = "Topological Information Dynamics Network — a novel neural architecture fusing information geometry, holographic message passing, MERA tensor networks, dual flow dynamics, and persistent homology"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "TIDN Research"}
+]
+keywords = [
+    "deep-learning",
+    "neural-architecture",
+    "information-geometry",
+    "topological-data-analysis",
+    "vector-symbolic-architectures",
+    "neural-ode",
+    "tensor-networks",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "einops>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1",
+]
+ode = [
+    "torchdiffeq>=0.2",
+]
+topology = [
+    "ripser>=0.6",
+    "gudhi>=3.9",
+    "persim>=0.3",
+]
+notebooks = [
+    "jupyter>=1.0",
+    "matplotlib>=3.7",
+    "plotly>=5.14",
+]
+all = [
+    "tidn[dev,ode,topology,notebooks]",
+]
+
+[project.urls]
+Homepage = "https://github.com/tidn-research/tidn"
+Repository = "https://github.com/tidn-research/tidn"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tidn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
