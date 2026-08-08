@@ -64,6 +64,14 @@ pip install -e ".[ode]"
 
 **Requirements**: Python ≥ 3.10, PyTorch ≥ 2.0
 
+> **Windows / PowerShell users**: If you encounter `KMP_DUPLICATE_LIB_OK` or OpenMP
+> errors, set the environment variable before running:
+> ```powershell
+> $env:KMP_DUPLICATE_LIB_OK = "TRUE"
+> pytest tests/ -v
+> ```
+> Or permanently: `[System.Environment]::SetEnvironmentVariable('KMP_DUPLICATE_LIB_OK','TRUE','User')`
+
 ---
 
 ## Quick Start

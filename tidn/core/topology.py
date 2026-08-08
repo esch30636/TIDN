@@ -74,7 +74,20 @@ def _compute_persistence_lightweight(
     D_inv_sqrt = torch.diag(1.0 / degree.sqrt())
     L_norm = torch.eye(n, device=device) - D_inv_sqrt @ adjacency @ D_inv_sqrt
 
-    eigenvalues = torch.linalg.eigvalsh(L_norm)
+    # eigvalsh may fail on ill-conditioned matrices; fall back to a
+    # regularized version or approximate via power iteration
+    try:
+        eigenvalues = torch.linalg.eigvalsh(L_norm)
+    except torch._C._LinAlgError:
+        # Regularize: add small identity to improve conditioning
+        L_reg = L_norm + 1e-6 * torch.eye(n, device=device)
+        try:
+            eigenvalues = torch.linalg.eigvalsh(L_reg)
+        except torch._C._LinAlgError:
+            # Fallback: use singular values of adjacency as proxy
+            # (not exact persistence but stable)
+            s = torch.linalg.svdvals(adjacency)
+            eigenvalues = 1.0 - s / s.max().clamp(min=1e-8)
 
     # Number of zero eigenvalues ≈ number of connected components
     # We use the spectral gap: small eigenvalues → near-disconnected components

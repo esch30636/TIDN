@@ -1,0 +1,24 @@
+# TIDN — Core dependencies
+# Install: pip install -r requirements.txt
+
+torch>=2.0
+numpy>=1.24
+scipy>=1.10
+einops>=0.7
+
+# Optional: Neural ODE support (dual flow dynamics)
+torchdiffeq>=0.2
+
+# Optional: Topological data analysis (persistent homology)
+ripser>=0.6
+persim>=0.3
+
+# Optional: Development tools
+pytest>=7.0
+pytest-cov>=4.0
+black>=23.0
+ruff>=0.1
+
+# Optional: Notebooks & visualization
+jupyter>=1.0
+matplotlib>=3.7
