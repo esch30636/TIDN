@@ -1,0 +1,15 @@
+{
+  "head_to_head": {},
+  "cnn": {
+    "param_count": 3510086,
+    "best_eval_reward": -21.0,
+    "final_eval_reward": -21.0,
+    "episodes_completed": 0
+  },
+  "tidn": {
+    "param_count": 4821203,
+    "best_eval_reward": -21.0,
+    "final_eval_reward": -21.0,
+    "episodes_completed": 0
+  }
+}

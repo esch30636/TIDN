@@ -19,6 +19,7 @@ Reference:
 from __future__ import annotations
 
 import math
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -52,9 +53,9 @@ class NatureCNN(nn.Module):
         super().__init__()
         self.num_actions = num_actions
 
-        self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+        self.conv1 = nn.Conv2d(4, 64, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(128, 128, kernel_size=3, stride=1)
 
         # Compute conv output size for FC layer
         self._conv_out_size = self._get_conv_out_size()
@@ -120,9 +121,9 @@ class TIDNDQN(nn.Module):
     def __init__(
         self,
         num_actions: int,
-        dim: int = 128,
+        dim: int = 192,
         patch_size: int = 12,
-        tidn_depth: int = 4,
+        tidn_depth: int = 3,
     ):
         super().__init__()
         self.num_actions = num_actions
@@ -130,11 +131,8 @@ class TIDNDQN(nn.Module):
         self.grid_size = 84 // patch_size  # 7
 
         # Patch embedding: 12×12×4 → dim
-        self.patch_embed = nn.Sequential(
-            nn.Conv2d(4, dim, kernel_size=patch_size, stride=patch_size),
-            nn.Flatten(2),  # (b, dim, 49)
-            nn.LayerNorm(dim),
-        )
+        self.patch_conv = nn.Conv2d(4, dim, kernel_size=patch_size, stride=patch_size)
+        self.patch_norm = nn.LayerNorm(dim)
 
         # Positional encoding for 7×7 grid
         self.pos_encoding = nn.Parameter(
@@ -146,15 +144,16 @@ class TIDNDQN(nn.Module):
             dim=dim,
             depth=tidn_depth,
             manifold_dim=min(32, dim // 4),
-            vsa_dim=min(512, dim * 4),
+            vsa_dim=min(256, dim * 2),
             num_heads=4,
             resonance_threshold=0.3,
             top_k_edges=16,
             mera_depth=2,
             mera_group_size=2,
             ode_steps=2,
-            topology_weight=0.01,
-            use_sparse_passing=True,
+            topology_weight=0.0,
+            use_simple_passing=True,
+            use_sparse_passing=False,
         )
         self.tidn = TIDN(tidn_config)
 
@@ -188,8 +187,9 @@ class TIDNDQN(nn.Module):
         x = frames.float() / 255.0
 
         # Patch embedding: (b, 4, 84, 84) → (b, dim, 7, 7) → (b, 49, dim)
-        patches = self.patch_embed(x)  # (b, dim, 49)
-        tokens = patches.transpose(1, 2)  # (b, 49, dim)
+        patches = self.patch_conv(x)  # (b, dim, 7, 7)
+        tokens = patches.flatten(2).transpose(1, 2)  # (b, 49, dim)
+        tokens = self.patch_norm(tokens)
         tokens = tokens + self.pos_encoding
 
         # TIDN processing
@@ -208,8 +208,9 @@ class TIDNDQN(nn.Module):
         """Forward pass returning Q-values and topology loss."""
         batch = frames.shape[0]
         x = frames.float() / 255.0
-        patches = self.patch_embed(x)
-        tokens = patches.transpose(1, 2)
+        patches = self.patch_conv(x)
+        tokens = patches.flatten(2).transpose(1, 2)
+        tokens = self.patch_norm(tokens)
         tokens = tokens + self.pos_encoding
 
         tidn_out, topo_loss = self.tidn(tokens, return_topo=True)
@@ -257,6 +258,8 @@ class DQNAgent:
         epsilon_decay: int = 1000000,
         target_update_freq: int = 10000,
         double_dqn: bool = True,
+        compile_model: bool = True,
+        use_amp: bool = True,
     ):
         self.device = device
         self.num_actions = num_actions
@@ -266,6 +269,7 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         self.target_update_freq = target_update_freq
         self.double_dqn = double_dqn
+        self.use_amp = use_amp
         self.steps_done = 0
 
         # Q-network and target network
@@ -273,9 +277,23 @@ class DQNAgent:
         self.target_net = self._copy_network(q_network).to(device)
         self.target_net.eval()
 
-        # Optimizer
-        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr)
-        self.loss_fn = nn.SmoothL1Loss()  # Huber loss (Nature paper uses this)
+        # torch.compile skipped on Windows (no Triton backend).
+        # Use BF16 AMP + TF32 instead for speed on RTX 4060 Ada Lovelace.
+        self._compiled = False
+        if compile_model and sys.platform != 'win32':
+            try:
+                self.q_net = torch.compile(self.q_net, mode="reduce-overhead")
+                self.target_net = torch.compile(self.target_net, mode="reduce-overhead")
+                self._compiled = True
+            except Exception:
+                pass
+
+        # Optimizer: fused AdamW for speed on CUDA
+        self.optimizer = torch.optim.AdamW(
+            self.q_net.parameters(), lr=lr,
+            fused=(str(device) == 'cuda'),
+        )
+        self.loss_fn = nn.SmoothL1Loss()  # Huber loss
 
         # Check if TIDN-based
         self._is_tidn = isinstance(q_network, TIDNDQN)
@@ -308,8 +326,9 @@ class DQNAgent:
             return np.random.randint(self.num_actions)
 
         with torch.no_grad():
-            state_t = torch.from_numpy(state).unsqueeze(0).to(self.device)
-            q_values = self.q_net(state_t)
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_amp else torch.enable_grad():
+                state_t = torch.from_numpy(state).unsqueeze(0).to(self.device)
+                q_values = self.q_net(state_t)
             return int(q_values.argmax(dim=1).item())
 
     def update(
@@ -339,32 +358,35 @@ class DQNAgent:
         next_states_t = torch.from_numpy(next_states).to(self.device)
         dones_t = torch.from_numpy(dones).to(self.device)
 
-        # Current Q-values
-        if self._is_tidn:
-            q_values, topo_loss = self.q_net.forward_with_topo(states_t)
-        else:
-            q_values = self.q_net(states_t)
-            topo_loss = torch.tensor(0.0, device=self.device)
+        # BF16 mixed precision for tensor core utilization (RTX 4060 Ada)
+        amp_ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_amp else torch.enable_grad()
 
-        q_value = q_values.gather(1, actions_t).squeeze(1)
-
-        # Target Q-values
-        with torch.no_grad():
-            if self.double_dqn:
-                # Double DQN: use online net for action selection
-                next_q_online = self.q_net(next_states_t)
-                best_actions = next_q_online.argmax(dim=1, keepdim=True)
-                next_q_target = self.target_net(next_states_t)
-                next_q_value = next_q_target.gather(1, best_actions).squeeze(1)
+        with amp_ctx:
+            # Current Q-values
+            if self._is_tidn:
+                q_values, topo_loss = self.q_net.forward_with_topo(states_t)
             else:
-                next_q_target = self.target_net(next_states_t)
-                next_q_value = next_q_target.max(dim=1).values
+                q_values = self.q_net(states_t)
+                topo_loss = torch.tensor(0.0, device=self.device)
 
-            target = rewards_t + self.gamma * next_q_value * (1.0 - dones_t)
+            q_value = q_values.gather(1, actions_t).squeeze(1)
 
-        # Huber loss
-        loss = self.loss_fn(q_value, target)
-        total_loss = loss + topo_loss * 0.01  # Small topology regularization
+            # Target Q-values
+            with torch.no_grad():
+                if self.double_dqn:
+                    next_q_online = self.q_net(next_states_t)
+                    best_actions = next_q_online.argmax(dim=1, keepdim=True)
+                    next_q_target = self.target_net(next_states_t)
+                    next_q_value = next_q_target.gather(1, best_actions).squeeze(1)
+                else:
+                    next_q_target = self.target_net(next_states_t)
+                    next_q_value = next_q_target.max(dim=1).values
+
+                target = rewards_t + self.gamma * next_q_value * (1.0 - dones_t)
+
+            # Huber loss
+            loss = self.loss_fn(q_value, target)
+            total_loss = loss + topo_loss * 0.01
 
         # Update
         self.optimizer.zero_grad()

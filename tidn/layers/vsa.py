@@ -209,52 +209,33 @@ class VSASuperpose(nn.Module):
 class ResonanceKey(nn.Module):
     """Generate VSA keys from Fisher-Rao geodesic distances.
 
-    Maps a geodesic distance d_F(i,j) to a VSA binding key that encodes
+    Maps a scalar distance d_F(i,j) to a VSA binding key that encodes
     the relationship between token i and token j. Closer tokens get
-    more similar keys.
+    more similar keys by continuity of the linear map.
 
-    Key(k) = FFT⁻¹( exp(i · 2π · f(d_F) · φ) )
-    where f maps distance to frequency and φ is a learned phase vector.
+    Uses a single linear projection with small initialization to avoid
+    gradient explosion through multi-layer MLP chains (which previously
+    caused a 10,000:1 gradient imbalance drowning out content learning).
+
+    Key(i,j) = normalize(W * d_F(i,j))
     """
 
-    def __init__(self, dim: int, num_frequencies: int = 32):
+    def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
-        self.num_frequencies = num_frequencies
-
-        # Learnable phases for each frequency
-        self.phases = nn.Parameter(torch.randn(num_frequencies) * 0.1)
-
-        # Distance → frequency mapping: sharper cutoff → more localized keys
-        self.freq_scale = nn.Parameter(torch.ones(1))
+        # Single linear layer: scalar distance -> dim-dimensional key
+        self.proj = nn.Linear(1, dim, bias=False)
+        # Very small init to balance gradient with content pathway
+        nn.init.normal_(self.proj.weight, std=0.01)
 
     def forward(self, distances: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            distances: (...,) or (n, n) Fisher-Rao distances
+            distances: (..., n, m) Fisher-Rao distances
 
         Returns:
-            keys: (..., dim) VSA keys encoding the distance structure
+            keys: (..., n, m, dim) VSA keys encoding the distance structure
         """
-        *batch_dims, n, m = distances.shape
-        device = distances.device
-
-        # Map distance to frequency: f(d) = tanh(scale · d)
-        # Closer tokens → lower frequency → more similar keys
-        freq = torch.tanh(self.freq_scale.abs() * distances)  # (..., n, n)
-
-        # Generate phase-encoded key in frequency domain
-        rfft_dim = self.dim // 2 + 1
-        key_f = torch.zeros(
-            *batch_dims, n, m, rfft_dim,
-            dtype=torch.complex64, device=device,
-        )
-
-        # Modulate learned frequency bands
-        for k in range(min(self.num_frequencies, rfft_dim)):
-            phase = self.phases[k] * freq  # (n, n)
-            key_f[..., k] = torch.exp(1j * phase.to(torch.complex64))
-
-        # IFFT to spatial domain
-        keys = torch.fft.irfft(key_f, n=self.dim, dim=-1)  # (n, n, dim)
-        return keys
+        d_input = distances.unsqueeze(-1)  # (..., n, m, 1)
+        keys = self.proj(d_input)  # (..., n, m, dim)
+        return F.normalize(keys, p=2, dim=-1)

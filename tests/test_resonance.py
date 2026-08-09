@@ -21,11 +21,17 @@ class TestResonanceGraph:
         assert adj_far.max() < 0.5, "Far points should be disconnected"
 
     def test_top_k(self):
+        # top_k only applied for n > 128 (to preserve gradient flow on small seqs)
         graph = ResonanceGraph(base_threshold=0.5, top_k=2)
-        d = torch.rand(1, 8, 8) * 0.3  # Many potential edges
-        adj = graph(d)
-        # Each node should have at most 2 edges + maybe self
-        n_edges = (adj > 0.1).float().sum(dim=-1)
+        d_small = torch.rand(1, 8, 8) * 0.3
+        adj_small = graph(d_small)
+        # Small n: top_k not applied, all edges with sigmoid activation exist
+        assert adj_small.shape == (1, 8, 8)
+
+        # Large n: top_k should limit edges
+        d_large = torch.rand(1, 200, 200) * 0.3
+        adj_large = graph(d_large)
+        n_edges = (adj_large > 0.1).float().sum(dim=-1)
         assert n_edges.max() <= 3  # top_k + tolerance
 
 

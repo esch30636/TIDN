@@ -62,14 +62,25 @@ class ResonanceGraph(nn.Module):
             self.log_threshold = nn.Parameter(
                 torch.tensor(base_threshold).log()
             )
+            # Learnable temperature: starts at 1.0 for soft, smooth edges
+            # that allow gradient flow. The model can sharpen it during training.
+            self.log_temperature = nn.Parameter(torch.tensor(0.0))  # log(1.0)
         else:
             self.register_buffer(
                 "log_threshold", torch.tensor(base_threshold).log()
+            )
+            self.register_buffer(
+                "log_temperature", torch.tensor(0.0)
             )
 
     @property
     def threshold(self) -> torch.Tensor:
         return self.log_threshold.exp()
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        """Softness of the resonance edge. Higher = softer edges, more gradient flow."""
+        return self.log_temperature.exp().clamp(min=0.1, max=10.0)
 
     def forward(
         self,
@@ -88,8 +99,10 @@ class ResonanceGraph(nn.Module):
         tau = self.threshold
 
         # Soft threshold: sigmoid((τ - d) / temperature)
-        # Edges form when distance is below threshold
-        temperature = 0.1
+        # Edges form when distance is below threshold.
+        # Temperature starts at 1.0 (soft, smooth) for healthy gradient flow
+        # and is learned — the model can sharpen it as training progresses.
+        temperature = self.temperature
         logits = (tau - distances) / temperature
         adjacency = torch.sigmoid(logits)
 
@@ -97,8 +110,11 @@ class ResonanceGraph(nn.Module):
         if mask is not None:
             adjacency = adjacency * mask.float()
 
-        # If top_k is specified, keep only top-k edges per node
-        if self.top_k is not None:
+        # If top_k is specified AND the sequence is long enough to need sparsity,
+        # keep only top-k edges per node. For short sequences (n <= 128), skip
+        # topk to preserve gradient flow — topk blocks gradient for non-selected
+        # edges, creating a deadlock where correct edges can never form.
+        if self.top_k is not None and adjacency.shape[-1] > 128:
             n = adjacency.shape[-1]
             k = min(self.top_k, n)
             _, top_indices = adjacency.topk(k, dim=-1)

@@ -92,7 +92,7 @@ class TestVSABindLayer:
 
 class TestResonanceKey:
     def test_output_shape(self):
-        rk = ResonanceKey(dim=256, num_frequencies=16)
+        rk = ResonanceKey(dim=256)
         distances = torch.rand(4, 8, 8)  # batch of distance matrices
         keys = rk(distances)
         assert keys.shape == (4, 8, 8, 256)

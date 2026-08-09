@@ -201,6 +201,92 @@ class HolographicMessagePassing(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+class SimpleMessagePassing(nn.Module):
+    """Mixed message passing: self-attention + resonance routing.
+
+    Self-attention provides a proven gradient highway for content routing,
+    while the resonance graph learns to modulate and eventually sparsify
+    the attention pattern.
+
+    Acts as: content' = norm(content + attn(content) + resonance(content, adj))
+    where attn is standard scaled dot-product attention and resonance is
+    weighted aggregation guided by the learned resonance graph.
+    """
+
+    def __init__(self, content_dim: int, num_heads: int = 4):
+        super().__init__()
+        self.content_dim = content_dim
+        head_dim = content_dim // num_heads
+        assert content_dim % num_heads == 0
+
+        # Standard multi-head self-attention
+        self.q_proj = nn.Linear(content_dim, content_dim)
+        self.k_proj = nn.Linear(content_dim, content_dim)
+        self.v_proj = nn.Linear(content_dim, content_dim)
+        self.o_proj = nn.Linear(content_dim, content_dim)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+        # Resonance-gated pathway
+        self.gate = nn.Parameter(torch.tensor(0.0))  # starts near zero
+
+        self.norm_attn = nn.LayerNorm(content_dim)
+        self.norm_res = nn.LayerNorm(content_dim)
+        self.norm_out = nn.LayerNorm(content_dim)
+
+    def forward(
+        self,
+        content: torch.Tensor,
+        adjacency: torch.Tensor,
+        top_k: int = 32,
+        distances: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            content: (batch, n, content_dim)
+            adjacency: (batch, n, n) resonance adjacency
+            top_k: max edges per node
+            distances: unused (kept for API compatibility)
+
+        Returns:
+            updated: (batch, n, content_dim)
+        """
+        batch, n, d = content.shape
+
+        # ---- Pathway 1: Standard self-attention (gradient highway) ----
+        q = self.q_proj(content).view(batch, n, self.num_heads, self.head_dim)
+        k = self.k_proj(content).view(batch, n, self.num_heads, self.head_dim)
+        v = self.v_proj(content).view(batch, n, self.num_heads, self.head_dim)
+
+        attn_scores = torch.einsum('bqhd,bkhd->bhqk', q, k) / (self.head_dim ** 0.5)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_out = torch.einsum('bhqk,bkhd->bqhd', attn_weights, v)
+        attn_out = attn_out.reshape(batch, n, d)
+        attn_out = self.o_proj(attn_out)
+
+        # ---- Pathway 2: Resonance-guided aggregation ----
+        # For small n, use all edges (gradient flows to all)
+        k_res = n  # full adjacency for small sequences
+        res_weights, res_indices = adjacency.topk(k_res, dim=1)  # (b, n, n)
+
+        src_gathered = torch.gather(
+            content.unsqueeze(1).expand(-1, n, -1, -1),
+            2,
+            res_indices.unsqueeze(-1).expand(-1, -1, -1, d),
+        )  # (b, n, n, d)
+
+        res_out = (src_gathered * res_weights.unsqueeze(-1)).sum(dim=2)  # (b, n, d)
+
+        # ---- Combine both pathways ----
+        gate_val = self.gate.sigmoid()  # learnable blend
+        updated = (
+            content
+            + self.norm_attn(attn_out)
+            + gate_val * self.norm_res(res_out)
+        )
+        return self.norm_out(updated)
+
+
 class SparseHolographicPassing(nn.Module):
     """Memory-efficient holographic message passing using sparse operations.
 
@@ -221,6 +307,15 @@ class SparseHolographicPassing(nn.Module):
         self.content_to_vsa = nn.Linear(content_dim, vsa_dim)
         self.vsa_to_content = nn.Linear(vsa_dim, content_dim)
 
+        # Per-edge key generator: maps source content to a binding key.
+        # This replaces the degenerate self-binding (v ⊛ normalize(v))
+        # with proper per-edge keys.
+        self.key_proj = nn.Linear(vsa_dim, vsa_dim, bias=False)
+        nn.init.orthogonal_(self.key_proj.weight)
+
+        # Resonance key: maps distances to phase-encoded keys
+        self.resonance_key = ResonanceKey(vsa_dim)
+
     def forward(
         self,
         content: torch.Tensor,
@@ -233,7 +328,7 @@ class SparseHolographicPassing(nn.Module):
             content: (batch, n, content_dim)
             adjacency: (batch, n, n) resonance adjacency
             top_k: maximum incoming edges per node
-            distances: optional Fisher-Rao distances (unused in sparse mode)
+            distances: (batch, n, n) optional Fisher-Rao distances for key gen
 
         Returns:
             updated: (batch, n, content_dim)
@@ -244,22 +339,38 @@ class SparseHolographicPassing(nn.Module):
         vsa = self.content_to_vsa(content)  # (b, n, vsa_dim)
 
         # For each target node, select top-k incoming edges
-        weights, indices = adjacency.topk(min(top_k, n), dim=1)
-        # weights: (b, n, top_k), indices: (b, n, top_k)
+        k = min(top_k, n)
+        weights, indices = adjacency.topk(k, dim=1)
+        # weights: (b, n, k), indices: (b, n, k) — for each target j, which source i
 
         # Gather source representations
-        # indices: (b, n, top_k) — for each target j, which source i
         src_gathered = torch.gather(
             vsa.unsqueeze(1).expand(-1, n, -1, -1),
             2,
             indices.unsqueeze(-1).expand(-1, -1, -1, self.vsa_dim),
-        )  # (b, n, top_k, vsa_dim)
+        )  # (b, n, k, vsa_dim)
 
-        # Bind with content-derived keys
-        src_keys = F.normalize(src_gathered, p=2, dim=-1)
-        bound = circular_convolution(src_gathered, src_keys)
+        # Generate per-edge keys.
+        # When Fisher-Rao distances are available, use resonance keys
+        # that encode the geometric relationship between source and target.
+        if distances is not None:
+            # distances[b, src, tgt] — gather the distances for selected edges
+            # indices[b, j, s] = source i for target j, edge rank s
+            batch_idx = torch.arange(batch, device=device).view(-1, 1, 1)
+            target_idx = torch.arange(n, device=device).view(1, -1, 1)
+            dist_gathered = distances[batch_idx, indices, target_idx]  # (b, n, k)
 
-        # Weight and sum
+            # ResonanceKey maps distances to phase-encoded per-edge keys
+            edge_keys = self.resonance_key(dist_gathered)  # (b, n, k, vsa_dim)
+        else:
+            # Per-source learned projection as fallback
+            src_keys = self.key_proj(src_gathered)
+            edge_keys = F.normalize(src_keys, p=2, dim=-1)
+
+        # Bind source content with edge-specific keys
+        bound = circular_convolution(src_gathered, edge_keys)
+
+        # Weight by adjacency strength and sum
         weighted = bound * weights.unsqueeze(-1)
         updated_vsa = weighted.sum(dim=2)  # (b, n, vsa_dim)
 

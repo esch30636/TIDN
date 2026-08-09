@@ -41,7 +41,7 @@ def train(
     total_steps: int = 200000,
     eval_interval: int = 10000,
     eval_episodes: int = 5,
-    batch_size: int = 32,
+    batch_size: int = 384,
     replay_capacity: int = 100000,
     learning_start: int = 50000,
     target_update: int = 10000,
@@ -52,6 +52,8 @@ def train(
     save_dir: str = "results/dqn_atari",
     render: bool = False,
     verbose: bool = True,
+    compile_model: bool = False,
+    use_amp: bool = True,
 ) -> Dict:
     """Train DQN agent(s) on Atari.
 
@@ -80,6 +82,13 @@ def train(
     np.random.seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # RTX 4060 optimizations
+    if device.type == 'cuda':
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+
     os.makedirs(save_dir, exist_ok=True)
 
     results = {}
@@ -93,6 +102,7 @@ def train(
             "cnn", game, total_steps, eval_interval, eval_episodes,
             batch_size, replay_capacity, learning_start, target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
+            compile_model=compile_model, use_amp=use_amp,
         )
         results["cnn"] = cnn_results
 
@@ -105,6 +115,7 @@ def train(
             "tidn", game, total_steps, eval_interval, eval_episodes,
             batch_size, replay_capacity, learning_start, target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
+            compile_model=compile_model, use_amp=use_amp,
         )
         results["tidn"] = tidn_results
 
@@ -137,6 +148,8 @@ def _train_single(
     render: bool,
     verbose: bool,
     device: torch.device,
+    compile_model: bool = False,
+    use_amp: bool = True,
 ) -> Dict:
     """Train a single architecture variant."""
 
@@ -164,6 +177,8 @@ def _train_single(
         lr=lr, gamma=gamma,
         epsilon_decay=epsilon_decay,
         target_update_freq=target_update,
+        compile_model=compile_model,
+        use_amp=use_amp,
     )
     replay = ReplayBuffer(capacity=replay_capacity, batch_size=batch_size, seed=seed)
 
@@ -213,12 +228,14 @@ def _train_single(
             episode_reward = 0.0
             episode_length = 0
 
-        # Training update
+        # Training update — multiple gradient steps per env step to keep GPU busy
         if replay.is_ready() and step >= learning_start:
-            states, actions, rewards, next_states, dones = replay.sample()
-            loss, td_error = agent.update(states, actions, rewards, next_states, dones)
-            metrics["loss"].append(loss)
-            metrics["td_error"].append(td_error)
+            updates_per_step = 16  # Saturate GPU: 16 gradient steps per env interaction
+            for _ in range(updates_per_step):
+                states, actions, rewards, next_states, dones = replay.sample()
+                loss, td_error = agent.update(states, actions, rewards, next_states, dones)
+                metrics["loss"].append(loss)
+                metrics["td_error"].append(td_error)
 
         # Evaluation
         if step % eval_interval == 0 and step > 0:
@@ -389,7 +406,7 @@ def main():
         help="Evaluation episodes",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
+        "--batch-size", type=int, default=384,
         help="Mini-batch size",
     )
     parser.add_argument(
@@ -411,6 +428,14 @@ def main():
     parser.add_argument(
         "--render", action="store_true",
         help="Render during evaluation",
+    )
+    parser.add_argument(
+        "--no-compile", action="store_true",
+        help="Disable torch.compile",
+    )
+    parser.add_argument(
+        "--no-amp", action="store_true",
+        help="Disable bfloat16 mixed precision",
     )
     parser.add_argument(
         "--learning-start", type=int, default=50000,
@@ -437,6 +462,8 @@ def main():
         seed=args.seed,
         save_dir=args.save_dir,
         render=args.render,
+        compile_model=not args.no_compile,
+        use_amp=not args.no_amp,
     )
 
 

@@ -31,7 +31,11 @@ import torch.nn as nn
 
 from tidn.core.manifold import StatisticalLift
 from tidn.core.resonance import ResonanceRouting
-from tidn.core.holographic import HolographicMessagePassing, SparseHolographicPassing
+from tidn.core.holographic import (
+    HolographicMessagePassing,
+    SimpleMessagePassing,
+    SparseHolographicPassing,
+)
 from tidn.core.mera import MERATree
 from tidn.core.dual_flow import DualFlowDynamics
 from tidn.core.topology import TopologyRegularizer, TopologyMonitor
@@ -75,6 +79,7 @@ class TIDNConfig:
     ode_steps: int = 4
     topology_weight: float = 0.01
     use_sparse_passing: bool = False
+    use_simple_passing: bool = False  # Debug: skip VSA, weighted aggregation
     use_approximate_resonance: bool = True
     dropout: float = 0.0
 
@@ -115,7 +120,11 @@ class TIDNLayer(nn.Module):
         )
 
         # Message passing
-        if config.use_sparse_passing:
+        if config.use_simple_passing:
+            self.message_pass = SimpleMessagePassing(
+                content_dim=config.dim, num_heads=config.num_heads
+            )
+        elif config.use_sparse_passing:
             self.message_pass = SparseHolographicPassing(
                 content_dim=config.dim,
                 vsa_dim=config.vsa_dim,
@@ -166,25 +175,29 @@ class TIDNLayer(nn.Module):
         adjacency, cluster_ids, threshold = self.resonance(mu, sigma_diag, mask)
 
         # 2. Holographic message passing
-        # First compute pairwise distances for resonance keys
+        # Compute pairwise Fisher-Rao distances for per-edge resonance keys.
+        # These distances encode the relational structure: closer tokens on the
+        # statistical manifold get more similar binding keys.
         from tidn.layers.geometry import pairwise_fisher_distance
 
-        # Use a subset for distance computation if too large
         n = mu.shape[1]
         if n <= 128:
-            distances = None  # Computed inside message_pass if needed
+            # Compute exact pairwise distances for the full batch
+            distances = pairwise_fisher_distance(mu[0], sigma_diag[0])
+            distances = distances.unsqueeze(0)  # (1, n, n)
+            if mu.shape[0] > 1:
+                # Extend to full batch (shared distance structure for now)
+                distances = distances.expand(mu.shape[0], -1, -1)
         else:
-            # Subsample for distance-based keys
+            # Subsample for distance-based keys on long sequences
             idx = torch.randperm(n, device=mu.device)[:128]
             mu_subset = mu[:, idx, :]
             s_subset = sigma_diag[:, idx, :]
-            distances_full = torch.zeros(
-                mu.shape[0], n, n, device=mu.device
-            )
+            distances = torch.zeros(mu.shape[0], n, n, device=mu.device)
             dist_subset = pairwise_fisher_distance(mu_subset[0], s_subset[0])
-            distances_full[0, :128, :128] = dist_subset
+            distances[0, :128, :128] = dist_subset
 
-        msg_result = self.message_pass(content, adjacency, distances=None)
+        msg_result = self.message_pass(content, adjacency, distances=distances)
         if isinstance(msg_result, tuple):
             updated_content, _keys = msg_result
         else:
@@ -307,6 +320,10 @@ class TIDN(nn.Module):
             refined, predictions, pred_errors = self.dual_flow(
                 last_with_mera["coarse_levels"]
             )
+            # Use the finest refined level to update content via the dual flow
+            # correction. refined[0] has the same shape as content.
+            if refined[0] is not None and refined[0].shape == content.shape:
+                content = content + 0.1 * (refined[0] - content)
 
         # Step 4: Output projection
         output = self.output_proj(content)

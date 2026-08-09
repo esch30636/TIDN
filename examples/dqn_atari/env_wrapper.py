@@ -22,6 +22,7 @@ import numpy as np
 
 try:
     import gymnasium as gym
+    import ale_py.registration  # register ALE environments
 except ImportError:
     import gym  # fallback to legacy gym
 
