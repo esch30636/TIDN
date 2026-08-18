@@ -10,7 +10,7 @@ Usage:
     python examples/dqn_atari/train.py --game PongNoFrameskip-v4 --arch tidn
 
 For a quick test (~10 min):
-    python examples/dqn_atari/train.py --game PongNoFrameskip-v4 --arch both --steps 50000 --eval-interval 5000
+    python examples/dqn_atari/train.py --game PongNoFrameskip-v4 --arch tidn --steps 2000 --learning-start 400 --batch-size 128 --updates-per-step 2 --eval-interval 1000
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ def train(
     batch_size: int = 384,
     replay_capacity: int = 100000,
     learning_start: int = 50000,
+    updates_per_step: int = 16,
     target_update: int = 10000,
     gamma: float = 0.99,
     epsilon_decay: int = 200000,
@@ -66,6 +67,7 @@ def train(
         batch_size: Mini-batch size
         replay_capacity: Replay buffer size
         learning_start: Steps before first training update
+        updates_per_step: Gradient updates per environment step
         target_update: Steps between target network syncs
         gamma: Discount factor
         epsilon_decay: ε decay steps
@@ -100,7 +102,8 @@ def train(
             print("=" * 60)
         cnn_results = _train_single(
             "cnn", game, total_steps, eval_interval, eval_episodes,
-            batch_size, replay_capacity, learning_start, target_update,
+            batch_size, replay_capacity, learning_start, updates_per_step,
+            target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
             compile_model=compile_model, use_amp=use_amp,
         )
@@ -113,7 +116,8 @@ def train(
             print("=" * 60)
         tidn_results = _train_single(
             "tidn", game, total_steps, eval_interval, eval_episodes,
-            batch_size, replay_capacity, learning_start, target_update,
+            batch_size, replay_capacity, learning_start, updates_per_step,
+            target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
             compile_model=compile_model, use_amp=use_amp,
         )
@@ -139,6 +143,7 @@ def _train_single(
     batch_size: int,
     replay_capacity: int,
     learning_start: int,
+    updates_per_step: int,
     target_update: int,
     gamma: float,
     epsilon_decay: int,
@@ -230,12 +235,19 @@ def _train_single(
 
         # Training update — multiple gradient steps per env step to keep GPU busy
         if replay.is_ready() and step >= learning_start:
-            updates_per_step = 16  # Saturate GPU: 16 gradient steps per env interaction
             for _ in range(updates_per_step):
                 states, actions, rewards, next_states, dones = replay.sample()
                 loss, td_error = agent.update(states, actions, rewards, next_states, dones)
                 metrics["loss"].append(loss)
                 metrics["td_error"].append(td_error)
+
+                # Progress print so long runs aren't silent
+                if verbose and len(metrics["loss"]) % 200 == 0:
+                    elapsed = time.time() - t0
+                    print(
+                        f"  Step {step:7d} | updates={len(metrics['loss']):8d} | "
+                        f"loss={loss:6.4f} | td={td_error:6.3f} | {elapsed:8.0f}s"
+                    )
 
         # Evaluation
         if step % eval_interval == 0 and step > 0:
@@ -284,8 +296,13 @@ def evaluate(
     num_episodes: int,
     device: torch.device,
     render: bool = False,
+    max_episode_steps: int = 20000,
 ) -> float:
     """Evaluate agent without exploration noise.
+
+    Args:
+        max_episode_steps: Safety cap on frames per episode so evaluation
+            can never run unbounded on a long game.
 
     Returns mean total reward over episodes.
     """
@@ -297,12 +314,14 @@ def evaluate(
         state, _ = env.reset()
         episode_reward = 0.0
         done = False
+        frames = 0
 
-        while not done:
+        while not done and frames < max_episode_steps:
             action = agent.select_action(state, training=False)
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             episode_reward += reward
+            frames += 1
 
         total_rewards.append(episode_reward)
 
@@ -442,6 +461,10 @@ def main():
         help="Steps before first training update",
     )
     parser.add_argument(
+        "--updates-per-step", type=int, default=16,
+        help="Gradient updates per environment step (use 2-4 for quick smoke tests)",
+    )
+    parser.add_argument(
         "--replay-capacity", type=int, default=100000,
         help="Replay buffer capacity",
     )
@@ -457,6 +480,7 @@ def main():
         batch_size=args.batch_size,
         replay_capacity=args.replay_capacity,
         learning_start=args.learning_start,
+        updates_per_step=args.updates_per_step,
         gamma=args.gamma,
         lr=args.lr,
         seed=args.seed,
