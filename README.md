@@ -217,6 +217,27 @@ python examples/dqn_atari/train.py --arch tidn --steps 2000 --learning-start 400
 
 **Verified end-to-end**: 2000 steps / 3200 updates in 11.5 min on RTX 4060 (0.17 s/update at batch 128). Full cycle confirmed: env → replay → GPU training → eval → checkpoint → results JSON. Eval reward -21 (random agent, expected — Pong needs 100k+ steps to learn).
 
+### 2026-08-18 — 100k-Step Head-to-Head Baseline (CNN vs TIDN)
+
+Full comparison run on RTX 4060 Laptop:
+
+| Setting | Value |
+|---------|-------|
+| Command | `--arch both --steps 100000 --learning-start 50000 --batch-size 128 --updates-per-step 2 --eval-interval 10000` |
+| Seed / AMP | 42 / BF16 + fused AdamW |
+
+| Metric | NatureCNN | TIDN-DQN |
+|--------|-----------|----------|
+| Parameters | 3,510,086 | 4,821,203 |
+| Total updates | 100,000 | 100,000 |
+| Wall time | **26 min** | **5.0 h** |
+| Effective update time | ~0.015 s | ~0.17 s (11.5× slower) |
+| Best eval reward | -21.0 | -21.0 |
+| Final eval reward | -21.0 | -21.0 |
+| In-training avg reward | -20.6 → -19.9 | peak -19.4 |
+
+**Conclusion**: neither architecture learned Pong within 100k gradient updates — far below the ~1M+ updates Nature DQN requires for Pong. This run serves as (a) a pipeline baseline and (b) a per-architecture speed reference. The intended learning regime remains `--updates-per-step 16` (1.6M updates), which at 0.17 s/update costs ~20–40 h per architecture for 100k steps. A learning run should use `--updates-per-step 8–16` and expect overnight-to-multi-day wall time.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
