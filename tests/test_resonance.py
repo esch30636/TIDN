@@ -49,6 +49,38 @@ class TestResonanceCluster:
         # All should be in same cluster
         assert ids.unique().numel() == 1
 
+    def test_two_disjoint_cliques_two_clusters(self):
+        """Regression for the vectorized min-node-id labeling: two disjoint
+        cliques must map to exactly two clusters with correct membership."""
+        cluster = ResonanceCluster(min_cluster_size=1)
+        adj = torch.zeros(2, 6, 6)
+        for b in range(2):
+            adj[b, :3, :3] = 1.0
+            adj[b, 3:, 3:] = 1.0
+        adj = adj * (1.0 - torch.eye(6))
+
+        ids, masks = cluster(adj)
+
+        for b in range(2):
+            row = ids[b]
+            assert row.unique().numel() == 2
+            assert row[:3].unique().numel() == 1  # first clique shares one id
+            assert row[3:].unique().numel() == 1  # second clique shares one id
+            assert row[0] != row[3]  # and the two cliques differ
+
+    def test_min_cluster_size_filters_small_clusters(self):
+        cluster = ResonanceCluster(min_cluster_size=3)
+        # clique of 2 + clique of 4
+        adj = torch.zeros(1, 6, 6)
+        adj[0, :2, :2] = 1.0
+        adj[0, 2:, 2:] = 1.0
+        adj = adj * (1.0 - torch.eye(6))
+
+        ids, masks = cluster(adj)
+        assert len(masks) == 1  # only the 4-node clique survives
+        assert masks[0].shape == (1, 6)
+        assert masks[0][0].sum().item() == 4
+
 
 class TestResonanceRouting:
     def test_forward_small(self):
