@@ -47,11 +47,13 @@ class ResonanceRouting(nn.Module):
         base_threshold: float = 0.5,
         top_k: Optional[int] = 32,
         use_approximate: bool = True,
+        use_clustering: bool = True,
         n_approx_thresh: int = 1024,
         num_pivots: Optional[int] = None,
     ):
         super().__init__()
         self.use_approximate = use_approximate
+        self.use_clustering = use_clustering
         self.n_approx_thresh = n_approx_thresh
 
         self.graph_builder = ResonanceGraph(
@@ -98,8 +100,12 @@ class ResonanceRouting(nn.Module):
             distances = fisher_rao_distance_gaussian(mu_i, s_i, mu_j, s_j)
             adjacency = self.graph_builder(distances, mask=batch_mask)
 
-        # Cluster based on resonance graph
-        cluster_ids, _ = self.cluster(adjacency)
+        # Cluster based on resonance graph (skippable: cluster ids are only
+        # consumed by MERATree, which currently ignores them)
+        if self.use_clustering:
+            cluster_ids, _ = self.cluster(adjacency)
+        else:
+            cluster_ids = None
 
         return adjacency, cluster_ids, self.graph_builder.threshold
 

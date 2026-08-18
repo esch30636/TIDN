@@ -26,6 +26,7 @@ References:
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 import torch
@@ -170,37 +171,40 @@ class ResonanceCluster(nn.Module):
         reachable = adj_binary + eye
 
         # Log-n iterations for path doubling
-        for _ in range(int(torch.log2(torch.tensor(n, dtype=torch.float)).ceil())):
+        for _ in range(math.ceil(math.log2(n)) if n > 1 else 0):
             reachable = (reachable @ reachable > 0).float()
 
-        # Assign cluster IDs (greedy: first node sets the cluster)
+        # Component label for each node = smallest node id in its component.
+        # Fully vectorized (no Python loops over batch or nodes — the
+        # previous per-(node, batch) indexed assignment was O(n·batch)
+        # GPU scatter ops with a sync each).
+        node_ids = torch.arange(n, dtype=torch.float, device=device).view(1, 1, -1)
+        raw_labels = (node_ids + (1 - reachable) * 1e9).amin(dim=-1).long()  # (b, n)
+
+        # Compact per-row labels to 0..k-1 ordered by first appearance
+        # (same semantics as the previous greedy assignment)
+        sorted_labels, sort_idx = torch.sort(raw_labels, dim=1)  # (b, n)
+        changed = sorted_labels[:, 1:] != sorted_labels[:, :-1]  # (b, n-1)
+        new_ids = torch.cat(
+            [
+                torch.zeros(batch, 1, dtype=torch.long, device=device),
+                changed.long().cumsum(dim=1),
+            ],
+            dim=1,
+        )
         cluster_ids = torch.zeros(batch, n, dtype=torch.long, device=device)
-        current_cluster = 0
+        cluster_ids.scatter_(1, sort_idx, new_ids)
 
-        assigned = torch.zeros(batch, n, dtype=torch.bool, device=device)
+        # Build cluster masks (single GPU→CPU sync, no per-cluster syncs)
+        n_clusters = int(cluster_ids.max().item()) + 1
+        masks = [cluster_ids == c for c in range(n_clusters)]
 
-        for i in range(n):
-            node_i = reachable[:, i, :] > 0  # (batch, n) — all nodes reachable from i
-            # Nodes reachable from i that haven't been assigned
-            unassigned_in_cluster = node_i & (~assigned)
+        if self.min_cluster_size <= 1:
+            return cluster_ids, masks
 
-            if unassigned_in_cluster.any():
-                # Create new cluster
-                for b in range(batch):
-                    if unassigned_in_cluster[b].any():
-                        cluster_ids[b, unassigned_in_cluster[b]] = current_cluster
-                        assigned[b, unassigned_in_cluster[b]] = True
-                current_cluster += 1
-
-        # Build cluster masks
-        unique_clusters = cluster_ids.unique()
-        cluster_masks = []
-        for cid in unique_clusters.tolist():
-            mask = cluster_ids == cid
-            if mask.sum(dim=-1).min() >= self.min_cluster_size:
-                cluster_masks.append(mask)
-
-        return cluster_ids, cluster_masks
+        sizes = torch.stack([m.sum(dim=-1).min() for m in masks])
+        valid = (sizes >= self.min_cluster_size).tolist()
+        return cluster_ids, [m for m, v in zip(masks, valid) if v]
 
 
 # ---------------------------------------------------------------------------

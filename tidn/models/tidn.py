@@ -81,6 +81,7 @@ class TIDNConfig:
     use_sparse_passing: bool = False
     use_simple_passing: bool = False  # Debug: skip VSA, weighted aggregation
     use_approximate_resonance: bool = True
+    use_clustering: bool = True  # ResonanceCluster output currently unused downstream
     dropout: float = 0.0
 
     def __post_init__(self):
@@ -117,6 +118,7 @@ class TIDNLayer(nn.Module):
             base_threshold=config.resonance_threshold,
             top_k=config.top_k_edges,
             use_approximate=config.use_approximate_resonance,
+            use_clustering=config.use_clustering,
         )
 
         # Message passing
@@ -332,20 +334,27 @@ class TIDN(nn.Module):
         result = [output]
 
         if return_topo:
-            topo_loss, topo_stats = self.topo_reg(adjacencies, return_stats=True)
+            # Skip persistence computation entirely when topology_weight is 0:
+            # it costs eigendecompositions + GPU syncs per batch element on
+            # every forward pass while contributing nothing to the loss.
+            if self.config.topology_weight > 0.0:
+                topo_loss, topo_stats = self.topo_reg(adjacencies, return_stats=True)
 
-            # Update monitor
-            resonance_stats = {}
-            if adjacencies:
-                mid_layer = adjacencies[len(adjacencies) // 2]
-                binary = (mid_layer > 0.5).float()
-                n = binary.shape[-1]
-                n_edges = binary.sum(dim=(-1, -2)) - n
-                resonance_stats["sparsity"] = (
-                    1.0 - (n_edges / (n * (n - 1))).mean()
-                ).item()
+                # Update monitor
+                resonance_stats = {}
+                if adjacencies:
+                    mid_layer = adjacencies[len(adjacencies) // 2]
+                    binary = (mid_layer > 0.5).float()
+                    n = binary.shape[-1]
+                    n_edges = binary.sum(dim=(-1, -2)) - n
+                    resonance_stats["sparsity"] = (
+                        1.0 - (n_edges / (n * (n - 1))).mean()
+                    ).item()
 
-            self.monitor.update(topo_stats, resonance_stats)
+                self.monitor.update(topo_stats, resonance_stats)
+            else:
+                topo_loss = torch.tensor(0.0, device=content.device)
+
             result.append(topo_loss)
 
         if return_all:

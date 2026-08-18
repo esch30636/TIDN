@@ -154,6 +154,7 @@ class TIDNDQN(nn.Module):
             topology_weight=0.0,
             use_simple_passing=True,
             use_sparse_passing=False,
+            use_clustering=False,
         )
         self.tidn = TIDN(tidn_config)
 

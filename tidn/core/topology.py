@@ -291,46 +291,60 @@ class TopologyRegularizer(nn.Module):
         stats = {"h0_counts": [], "h1_counts": [], "mean_persistence": []}
 
         for layer_idx, adj in enumerate(adjacency_list):
-            batch = adj.shape[0]
-            layer_loss = torch.tensor(0.0, device=adj.device)
+            batch, n = adj.shape[0], adj.shape[-1]
 
-            for b in range(batch):
-                diagrams = _compute_persistence_lightweight(
-                    adj[b], self.max_homology_dim
-                )
+            # Batched spectral persistence: one eigendecomposition for the
+            # whole batch instead of a per-sample Python loop. This avoids
+            # batch × layers eigendecompositions + .item() GPU syncs per call.
+            degree = adj.sum(dim=-1).clamp(min=1e-8)
+            d_inv_sqrt = torch.diag_embed(1.0 / degree.sqrt())
+            eye = torch.eye(n, device=adj.device)
+            l_norm = eye - d_inv_sqrt @ adj @ d_inv_sqrt
 
-                # H₀ loss: penalize deviation from healthy number of components
-                if 0 in diagrams and diagrams[0].shape[0] > 0:
-                    h0_count = diagrams[0].shape[0]
-                    stats["h0_counts"].append(h0_count)
+            # eigvalsh may fail on ill-conditioned matrices; fall back to a
+            # regularized version
+            try:
+                eigenvalues = torch.linalg.eigvalsh(l_norm)  # (batch, n)
+            except torch._C._LinAlgError:
+                l_reg = l_norm + 1e-6 * eye
+                eigenvalues = torch.linalg.eigvalsh(l_reg)
 
-                    # Target: moderate number of components (not all merged, not all isolated)
-                    n = adj[b].shape[0]
-                    target_h0 = self.target_betti[0] if self.target_betti else max(2, n // 4)
+            # H₀: eigenvalues near zero ≈ connected components
+            h0_mask = eigenvalues.clamp(min=0) > 1e-4
+            h0_counts = h0_mask.sum(dim=1).float()  # (batch,)
 
-                    h0_loss = ((h0_count - target_h0) / n) ** 2
-                    layer_loss += h0_loss
+            # Target: moderate number of components (not all merged, not all isolated)
+            target_h0 = self.target_betti[0] if self.target_betti else max(2, n // 4)
+            h0_loss = ((h0_counts - target_h0) / n) ** 2
 
-                    # Persistence should follow power-law (healthy spectrum)
-                    persistences = diagrams[0][:, 1] - diagrams[0][:, 0]
-                    if len(persistences) > 1:
-                        stats["mean_persistence"].append(persistences.mean().item())
+            # H₁: consecutive eigenvalue gaps as birth-death pairs
+            if n > 2:
+                sorted_ev = eigenvalues.sort(dim=1).values
+                persistence = sorted_ev[:, 1:] - sorted_ev[:, :-1]
+                significant = persistence > 0.01
+                h1_counts = significant.sum(dim=1).float()
 
-                # H₁ loss: encourage meaningful cyclic structure
-                if 1 in diagrams and diagrams[1].shape[0] > 0:
-                    h1_count = diagrams[1].shape[0]
-                    stats["h1_counts"].append(h1_count)
+                target_h1 = self.target_betti[1] if self.target_betti else 1
+                h1_loss = ((h1_counts - target_h1) / max(1, n)) ** 2
 
-                    target_h1 = self.target_betti[1] if self.target_betti else 1
-                    h1_loss = ((h1_count - target_h1) / max(1, adj[b].shape[0])) ** 2
-                    layer_loss += h1_loss
+                # Penalize very short-lived cycles (noise)
+                noise_penalty = 0.1 * (persistence < 0.05).float().mean(dim=1)
+            else:
+                h1_counts = torch.zeros_like(h0_counts)
+                h1_loss = torch.zeros_like(h0_loss)
+                noise_penalty = torch.zeros_like(h0_loss)
 
-                    # Penalize very short-lived cycles (noise)
-                    h1_persistences = diagrams[1][:, 1] - diagrams[1][:, 0]
-                    noise_penalty = (h1_persistences < 0.05).float().mean()
-                    layer_loss += 0.1 * noise_penalty
+            layer_loss = (h0_loss + h1_loss + noise_penalty).mean()
 
-            total_loss += layer_loss / batch
+            # Diagnostic stats aggregated on device (no .item() syncs)
+            stats["h0_counts"].append(h0_counts.detach())
+            stats["h1_counts"].append(h1_counts.detach())
+            stats["mean_persistence"].append(
+                ((eigenvalues.clamp(min=0) * h0_mask).sum(dim=-1)
+                 / h0_counts.clamp(min=1)).detach()
+            )
+
+            total_loss += layer_loss
 
         total_loss = total_loss / max(1, len(adjacency_list))
         total_loss = self.homology_weight * total_loss
