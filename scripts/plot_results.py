@@ -42,7 +42,15 @@ def plot_results(input_path: str, output_path: str, window: int) -> None:
     loss = np.asarray(metrics.get("loss", []), dtype=float)
     td_error = np.asarray(metrics.get("td_error", []), dtype=float)
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=False)
+    # Optional evaluation-reward curve (e.g. CartPole runs)
+    eval_rewards = np.asarray(metrics.get("eval_rewards", []), dtype=float)
+    eval_steps = np.asarray(data.get("eval_steps", []), dtype=float)
+    has_eval = eval_rewards.size > 0
+
+    n_rows = 3 if has_eval else 2
+    fig, axes = plt.subplots(n_rows, 1, figsize=(10, 3.5 * n_rows), sharex=False)
+    if n_rows == 2:
+        axes = [axes[0], axes[1]]
 
     # Loss
     ax = axes[0]
@@ -73,6 +81,20 @@ def plot_results(input_path: str, output_path: str, window: int) -> None:
     ax.set_ylabel("TD error")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
+
+    # Evaluation reward vs environment step
+    if has_eval:
+        ax = axes[2]
+        ax.plot(
+            eval_steps, eval_rewards,
+            marker="o", ms=3, color="tab:green", lw=1.4,
+            label="eval reward",
+        )
+        ax.axhline(195, color="tab:red", ls="--", lw=0.8, label="solved (195)")
+        ax.set_xlabel("environment step")
+        ax.set_ylabel("Eval reward")
+        ax.legend(loc="upper left", fontsize=8)
+        ax.grid(alpha=0.3)
 
     fig.suptitle(
         f"best eval reward: {best_eval} | final eval reward: {final_eval}",
