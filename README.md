@@ -253,6 +253,20 @@ Before committing GPU-days to Atari, a cheap check that TIDN can learn RL at all
 
 **Result**: TIDN does learn — eval rewards reach 163–281, far above the random baseline (~10–25) — so the architecture is trainable end-to-end. However its policy is unstable at this scale (collapses to 21 at 22k and 30k steps) while the 8× smaller MLP learns robustly. Stability candidates for the next iteration: lower LR, longer target-update interval, slower epsilon decay, or per-architecture tuning of `TIDNConfig` (depth/dim).
 
+### 2026-08-20 — CartPole Stability Sweep (4 configs × 30k steps)
+
+| Group | LR | Target update | Eps decay | Best eval | Final eval | Min eval |
+|-------|----|----|----|----|----|----|
+| baseline | 1e-3 | 500 | 8000 | 281 | 21 | ~10 |
+| `lr3e-4` | 3e-4 | 500 | 8000 | 242 | **105** | 10 |
+| `target1k` | 1e-3 | 1000 | 8000 | **422** | 35 | 11 |
+| `epsslow` | 1e-3 | 500 | 16000 | 216 | 93 | 9 |
+| `combo` | 3e-4 | 1000 | 16000 | 215 | 93 | 10 |
+
+(MLP baseline for reference: best 440 / final 103, min 81 after learning starts.)
+
+**Findings**: lowering LR improves the final policy most (final 21→105); slower epsilon decay also helps (93). No single config eliminates late-training collapses (min ≈ 10 in every group) — TIDN's policy remains noisier than the MLP's. Next candidates: target-network freezing schedule, replay ratio, or TIDN-internal regularization. Sweep comparison chart: `scripts/plot_sweep.py` → `results/dqn_cartpole/sweep_curves.png`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
