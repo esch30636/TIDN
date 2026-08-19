@@ -238,6 +238,21 @@ Full comparison run on RTX 4060 Laptop:
 
 **Conclusion**: neither architecture learned Pong within 100k gradient updates — far below the ~1M+ updates Nature DQN requires for Pong. This run serves as (a) a pipeline baseline and (b) a per-architecture speed reference. The intended learning regime remains `--updates-per-step 16` (1.6M updates), which at 0.17 s/update costs ~20–40 h per architecture for 100k steps. A learning run should use `--updates-per-step 8–16` and expect overnight-to-multi-day wall time.
 
+### 2026-08-19 — CartPole Learning-Ability Check (MLP vs TIDN)
+
+Before committing GPU-days to Atari, a cheap check that TIDN can learn RL at all: `examples/dqn_cartpole/train.py`, CartPole-v1 (4-dim obs, 2 actions), Double DQN, 30k env steps, eval every 2k.
+
+| Metric | MLP-DQN | TIDN-DQN |
+|--------|---------|----------|
+| Parameters | 17,410 | 233,050 |
+| Env steps / updates | 30,000 / 29,000 | 30,000 / 29,000 |
+| Wall time (RTX 4060) | 3 min | 26 min |
+| Best eval reward | 440 | 281 |
+| Final eval reward | 103 | 21 |
+| Solved (mean eval ≥ 195)? | Yes, stable after ~4k steps | Transiently (unstable) |
+
+**Result**: TIDN does learn — eval rewards reach 163–281, far above the random baseline (~10–25) — so the architecture is trainable end-to-end. However its policy is unstable at this scale (collapses to 21 at 22k and 30k steps) while the 8× smaller MLP learns robustly. Stability candidates for the next iteration: lower LR, longer target-update interval, slower epsilon decay, or per-architecture tuning of `TIDNConfig` (depth/dim).
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
