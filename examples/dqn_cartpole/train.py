@@ -395,7 +395,8 @@ def main():
         for arch, r in results.items()
     }
     os.makedirs(args.save_dir, exist_ok=True)
-    with open(os.path.join(args.save_dir, "comparison.json"), "w") as f:
+    comp_prefix = f"{args.tag}_" if args.tag else ""
+    with open(os.path.join(args.save_dir, f"{comp_prefix}comparison.json"), "w") as f:
         json.dump(comparison, f, indent=2)
 
     print("\n" + "=" * 60)

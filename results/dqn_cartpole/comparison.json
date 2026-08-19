@@ -1,8 +1,14 @@
 {
+  "mlp": {
+    "param_count": 17410,
+    "best_eval_reward": 440.0,
+    "final_eval_reward": 103.0,
+    "episodes_completed": 505
+  },
   "tidn": {
     "param_count": 233050,
-    "best_eval_reward": 242.0,
-    "final_eval_reward": 105.0,
-    "episodes_completed": 548
+    "best_eval_reward": 281.0,
+    "final_eval_reward": 21.0,
+    "episodes_completed": 599
   }
 }
