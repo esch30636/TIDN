@@ -240,14 +240,29 @@ def evaluate(agent: DQNAgent, num_episodes: int = 10) -> float:
     return float(np.mean(rewards))
 
 
-def _make_agent(arch: str, device: torch.device, seed: int) -> DQNAgent:
+def _make_agent(
+    arch: str,
+    device: torch.device,
+    seed: int,
+    lr: float,
+    target_update_freq: int,
+    epsilon_decay: int,
+) -> DQNAgent:
     if arch == "mlp":
         q_net = MLPQNet(obs_dim=4, num_actions=2)
     elif arch == "tidn":
         q_net = TIDNQNet(obs_dim=4, num_actions=2)
     else:
         raise ValueError(f"unknown arch: {arch}")
-    return DQNAgent(q_net, num_actions=2, device=device, seed=seed)
+    return DQNAgent(
+        q_net,
+        num_actions=2,
+        device=device,
+        seed=seed,
+        lr=lr,
+        target_update_freq=target_update_freq,
+        epsilon_decay=epsilon_decay,
+    )
 
 
 def train_single(
@@ -259,9 +274,13 @@ def train_single(
     device: torch.device,
     save_dir: str,
     seed: int,
+    lr: float,
+    target_update_freq: int,
+    epsilon_decay: int,
+    tag: str = "",
 ) -> Dict:
     env = gym.make("CartPole-v1")
-    agent = _make_agent(arch, device, seed)
+    agent = _make_agent(arch, device, seed, lr, target_update_freq, epsilon_decay)
     replay: Deque = deque(maxlen=100000)
 
     metrics: Dict[str, List[float]] = {"loss": [], "td_error": [], "eval_rewards": []}
@@ -318,7 +337,8 @@ def train_single(
         "metrics": metrics,
     }
     os.makedirs(save_dir, exist_ok=True)
-    with open(os.path.join(save_dir, f"{arch}_results.json"), "w") as f:
+    prefix = f"{tag}_" if tag else ""
+    with open(os.path.join(save_dir, f"{prefix}{arch}_results.json"), "w") as f:
         json.dump(result, f, indent=2)
     return result
 
@@ -333,6 +353,10 @@ def main():
     parser.add_argument("--save-dir", default="results/dqn_cartpole")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--target-update-freq", type=int, default=500)
+    parser.add_argument("--epsilon-decay", type=int, default=8000)
+    parser.add_argument("--tag", default="", help="Prefix for result filenames (sweeps)")
     args = parser.parse_args()
 
     device = torch.device(
@@ -355,6 +379,10 @@ def main():
             device=device,
             save_dir=args.save_dir,
             seed=args.seed,
+            lr=args.lr,
+            target_update_freq=args.target_update_freq,
+            epsilon_decay=args.epsilon_decay,
+            tag=args.tag,
         )
 
     comparison = {
