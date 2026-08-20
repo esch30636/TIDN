@@ -80,6 +80,7 @@ class TIDNQNet(nn.Module):
         num_actions: int,
         dim: int = 64,
         depth: int = 2,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -103,6 +104,7 @@ class TIDNQNet(nn.Module):
             use_simple_passing=True,
             use_sparse_passing=False,
             use_clustering=False,
+            dropout=dropout,
         )
         self.tidn = TIDN(tidn_config)
 
@@ -141,6 +143,7 @@ class DQNAgent:
         target_update_freq: int = 500,
         double_dqn: bool = True,
         seed: int = 42,
+        soft_tau: float = 0.0,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -153,6 +156,7 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         self.target_update_freq = target_update_freq
         self.double_dqn = double_dqn
+        self.soft_tau = soft_tau  # > 0: Polyak soft update every step
         self.steps_done = 0
 
         self.q_net = q_net.to(device)
@@ -210,7 +214,16 @@ class DQNAgent:
         self.optimizer.step()
 
         self.steps_done += 1
-        if self.steps_done % self.target_update_freq == 0:
+        if self.soft_tau > 0:
+            # Polyak averaging: target = tau * online + (1 - tau) * target
+            with torch.no_grad():
+                for tp, op in zip(
+                    self.target_net.parameters(), self.q_net.parameters()
+                ):
+                    tp.data.mul_(1.0 - self.soft_tau).add_(
+                        op.data, alpha=self.soft_tau
+                    )
+        elif self.steps_done % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
         td_error = (q_value - target).abs().mean().item()
@@ -247,11 +260,17 @@ def _make_agent(
     lr: float,
     target_update_freq: int,
     epsilon_decay: int,
+    soft_tau: float,
+    dropout: float,
+    tidn_dim: int,
+    tidn_depth: int,
 ) -> DQNAgent:
     if arch == "mlp":
         q_net = MLPQNet(obs_dim=4, num_actions=2)
     elif arch == "tidn":
-        q_net = TIDNQNet(obs_dim=4, num_actions=2)
+        q_net = TIDNQNet(
+            obs_dim=4, num_actions=2, dim=tidn_dim, depth=tidn_depth, dropout=dropout
+        )
     else:
         raise ValueError(f"unknown arch: {arch}")
     return DQNAgent(
@@ -262,6 +281,7 @@ def _make_agent(
         lr=lr,
         target_update_freq=target_update_freq,
         epsilon_decay=epsilon_decay,
+        soft_tau=soft_tau,
     )
 
 
@@ -277,10 +297,17 @@ def train_single(
     lr: float,
     target_update_freq: int,
     epsilon_decay: int,
+    soft_tau: float,
+    dropout: float,
+    tidn_dim: int,
+    tidn_depth: int,
     tag: str = "",
 ) -> Dict:
     env = gym.make("CartPole-v1")
-    agent = _make_agent(arch, device, seed, lr, target_update_freq, epsilon_decay)
+    agent = _make_agent(
+        arch, device, seed, lr, target_update_freq, epsilon_decay,
+        soft_tau, dropout, tidn_dim, tidn_depth,
+    )
     replay: Deque = deque(maxlen=100000)
 
     metrics: Dict[str, List[float]] = {"loss": [], "td_error": [], "eval_rewards": []}
@@ -356,6 +383,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--target-update-freq", type=int, default=500)
     parser.add_argument("--epsilon-decay", type=int, default=8000)
+    parser.add_argument("--soft-tau", type=float, default=0.0,
+                        help="Polyak soft target update (0 = hard sync)")
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--tidn-dim", type=int, default=64)
+    parser.add_argument("--tidn-depth", type=int, default=2)
     parser.add_argument("--tag", default="", help="Prefix for result filenames (sweeps)")
     args = parser.parse_args()
 
@@ -382,6 +414,10 @@ def main():
             lr=args.lr,
             target_update_freq=args.target_update_freq,
             epsilon_decay=args.epsilon_decay,
+            soft_tau=args.soft_tau,
+            dropout=args.dropout,
+            tidn_dim=args.tidn_dim,
+            tidn_depth=args.tidn_depth,
             tag=args.tag,
         )
 
