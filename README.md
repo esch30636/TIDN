@@ -287,6 +287,25 @@ All groups build on the round-1 winner (`lr=3e-4`):
 
 New train.py flags: `--soft-tau`, `--dropout`, `--tidn-dim`, `--tidn-depth`.
 
+### 2026-08-20 — CartPole Stability Sweep Round 3 (topology regularizer & replay ratio)
+
+All groups build on lr 3e-4 + soft τ=0.01 (round-2 winner: best 336 / final 100 / post-2k floor 52):
+
+| Group | Change | Best eval | Final eval | Post-2k floor |
+|-------|--------|-----------|------------|---------------|
+| `topo01` | topology regularizer (w=0.01) added to the DQN loss | **500** (×3) | 137 | 66 |
+| `wd005` | weight decay 0.05 | 265 | 129 | 48 |
+| `softsync2k` | soft update + hard resync every 2000 | 500 | 101 | 31 |
+| `replay2` | 2 gradient updates per env step | **500** (×2) | **138** | **72** |
+
+**Findings**:
+- **The TIDN topology regularizer works as an RL regularizer**: `topo01` beats the soft-update baseline on every metric — best 336→500, final 100→137, floor 52→66. This is the first evidence that the persistent-homology loss helps optimization in a reinforcement-learning setting.
+- **Higher replay ratio is the strongest stabilizer**: `replay2` reaches floor 72 and final 138 (both sweep records) at 2× the update cost.
+- Hard resync on top of soft updates (`softsync2k`) *hurts*: the periodic hard sync re-introduces target jumps (floor 31). Pure Polyak averaging is strictly better.
+- Stronger weight decay (`wd005`) trades peak for a modestly better final (129) at a slightly lower floor.
+
+Natural next experiment: `topo01` + `replay2` combined. New train.py flags: `--topology-weight`, `--weight-decay`, `--soft-sync-interval`, `--updates-per-step`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
