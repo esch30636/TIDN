@@ -306,6 +306,22 @@ All groups build on lr 3e-4 + soft τ=0.01 (round-2 winner: best 336 / final 100
 
 Natural next experiment: `topo01` + `replay2` combined. New train.py flags: `--topology-weight`, `--weight-decay`, `--soft-sync-interval`, `--updates-per-step`.
 
+### 2026-08-20 — CartPole Final: winner combination does not stack (negative result)
+
+Combined `topo01 + replay2` (topology 0.01 + 2 updates/step on the lr 3e-4 + soft-τ base), two seeds:
+
+| Group | Best eval | Final eval | Post-2k floor |
+|-------|-----------|------------|---------------|
+| `topo2x` seed 42 | 166 | 86 | 32 |
+| `topo2x` seed 123 | 500 | 113 | 24 |
+| `topo01` alone (ref) | 500 | 137 | 66 |
+| `replay2` alone (ref) | 500 | 138 | 72 |
+
+**Findings**:
+- The two winning stabilizers **interfere**: the combo underperforms either component alone on floor and final reward — topology pressure doubles when applied twice per env step (2 updates), overshooting the regularization sweet spot.
+- The two seeds also expose **high run-to-run variance** (best 166 vs 500 for identical hyperparameters), so the single-seed rankings from rounds 1–3 are suggestive, not definitive — worth reporting with means over ≥3 seeds before paper claims.
+- Practical recipe from the whole CartPole line: **lr 3e-4 + soft τ=0.01, plus one stabilizer — either topology 0.01 or 2 updates/step, not both.**
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
