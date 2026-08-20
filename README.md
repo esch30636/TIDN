@@ -267,6 +267,26 @@ Before committing GPU-days to Atari, a cheap check that TIDN can learn RL at all
 
 **Findings**: lowering LR improves the final policy most (final 21→105); slower epsilon decay also helps (93). No single config eliminates late-training collapses (min ≈ 10 in every group) — TIDN's policy remains noisier than the MLP's. Next candidates: target-network freezing schedule, replay ratio, or TIDN-internal regularization. Sweep comparison chart: `scripts/plot_sweep.py` → `results/dqn_cartpole/sweep_curves.png`.
 
+### 2026-08-20 — CartPole Stability Sweep Round 2 (target update & regularization)
+
+All groups build on the round-1 winner (`lr=3e-4`):
+
+| Group | Change | Best eval | Final eval | Post-2k floor |
+|-------|--------|-----------|------------|---------------|
+| `lr3e-4` (ref) | — | 242 | 105 | 10 |
+| `softtau` | Polyak soft target update τ=0.01 every step | 336 | 100 | **52** |
+| `target2k` | Hard sync interval 2000 | **500** | **500** | 47 |
+| `drop01` | TIDN dropout 0.1 | 341 | 110 | 25 |
+| `small` | dim 32 / depth 1 (56k params) | 157 | 110 | 18 |
+
+**Findings**:
+- **Soft target updates are the biggest stability lever**: the post-2k floor rises from ~10 to 52 — policy never collapses late (typical eval 87–125).
+- **Slow hard sync reaches the max score**: `target2k` hits 500 (perfect CartPole) twice at the end, with mid-run dips (47, 97) — lower LR + 2000-step syncs lets the policy settle.
+- Dropout and a 4× smaller TIDN also raise the floor (25 / 18) but peak lower.
+- Recommended CartPole/RL baseline going forward: **lr 3e-4 + soft τ=0.01** for stability, or lr 3e-4 + target 2000 for peak. Both mechanisms are alternatives (soft update supersedes hard syncs in the agent implementation).
+
+New train.py flags: `--soft-tau`, `--dropout`, `--tidn-dim`, `--tidn-depth`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
