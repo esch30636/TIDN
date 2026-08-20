@@ -81,6 +81,7 @@ class TIDNQNet(nn.Module):
         dim: int = 64,
         depth: int = 2,
         dropout: float = 0.0,
+        topology_weight: float = 0.0,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -100,7 +101,7 @@ class TIDNQNet(nn.Module):
             mera_depth=1,
             mera_group_size=2,
             ode_steps=2,
-            topology_weight=0.0,
+            topology_weight=topology_weight,
             use_simple_passing=True,
             use_sparse_passing=False,
             use_clustering=False,
@@ -119,6 +120,14 @@ class TIDNQNet(nn.Module):
         tidn_out, _ = self.tidn(tokens, return_topo=True)
         pooled = tidn_out.mean(dim=1)  # (batch, dim)
         return self.q_head(pooled)
+
+    def forward_with_topo(self, obs: torch.Tensor):
+        """Q-values plus the TIDN topology loss (zero when weight is 0)."""
+        tokens = self.token_proj(obs).view(obs.shape[0], self.obs_dim, -1)
+        tokens = self.token_norm(tokens)
+        tidn_out, topo_loss = self.tidn(tokens, return_topo=True)
+        pooled = tidn_out.mean(dim=1)
+        return self.q_head(pooled), topo_loss
 
     @property
     def param_count(self) -> int:
@@ -144,6 +153,8 @@ class DQNAgent:
         double_dqn: bool = True,
         seed: int = 42,
         soft_tau: float = 0.0,
+        weight_decay: float = 0.01,
+        soft_sync_interval: int = 0,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -157,7 +168,9 @@ class DQNAgent:
         self.target_update_freq = target_update_freq
         self.double_dqn = double_dqn
         self.soft_tau = soft_tau  # > 0: Polyak soft update every step
+        self.soft_sync_interval = soft_sync_interval  # hard resync on top of soft
         self.steps_done = 0
+        self._is_tidn = isinstance(q_net, TIDNQNet)
 
         self.q_net = q_net.to(device)
         import copy
@@ -165,7 +178,9 @@ class DQNAgent:
         self.target_net = copy.deepcopy(q_net).to(device)
         self.target_net.eval()
 
-        self.optimizer = torch.optim.AdamW(self.q_net.parameters(), lr=lr)
+        self.optimizer = torch.optim.AdamW(
+            self.q_net.parameters(), lr=lr, weight_decay=weight_decay
+        )
         self.loss_fn = nn.SmoothL1Loss()
 
     @property
@@ -195,7 +210,11 @@ class DQNAgent:
         next_states_t = torch.from_numpy(next_states).float().to(self.device)
         dones_t = torch.from_numpy(dones).float().to(self.device)
 
-        q_values = self.q_net(states_t)
+        if self._is_tidn:
+            q_values, topo_loss = self.q_net.forward_with_topo(states_t)
+        else:
+            q_values = self.q_net(states_t)
+            topo_loss = torch.tensor(0.0, device=self.device)
         q_value = q_values.gather(1, actions_t).squeeze(1)
 
         with torch.no_grad():
@@ -207,7 +226,8 @@ class DQNAgent:
 
             target = rewards_t + self.gamma * next_q_value * (1.0 - dones_t)
 
-        loss = self.loss_fn(q_value, target)
+        # Topology loss (already scaled by homology_weight inside TIDN)
+        loss = self.loss_fn(q_value, target) + topo_loss
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), 10.0)
@@ -223,6 +243,11 @@ class DQNAgent:
                     tp.data.mul_(1.0 - self.soft_tau).add_(
                         op.data, alpha=self.soft_tau
                     )
+            if (
+                self.soft_sync_interval > 0
+                and self.steps_done % self.soft_sync_interval == 0
+            ):
+                self.target_net.load_state_dict(self.q_net.state_dict())
         elif self.steps_done % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
@@ -264,12 +289,16 @@ def _make_agent(
     dropout: float,
     tidn_dim: int,
     tidn_depth: int,
+    topology_weight: float,
+    weight_decay: float,
+    soft_sync_interval: int,
 ) -> DQNAgent:
     if arch == "mlp":
         q_net = MLPQNet(obs_dim=4, num_actions=2)
     elif arch == "tidn":
         q_net = TIDNQNet(
-            obs_dim=4, num_actions=2, dim=tidn_dim, depth=tidn_depth, dropout=dropout
+            obs_dim=4, num_actions=2, dim=tidn_dim, depth=tidn_depth,
+            dropout=dropout, topology_weight=topology_weight,
         )
     else:
         raise ValueError(f"unknown arch: {arch}")
@@ -282,6 +311,8 @@ def _make_agent(
         target_update_freq=target_update_freq,
         epsilon_decay=epsilon_decay,
         soft_tau=soft_tau,
+        weight_decay=weight_decay,
+        soft_sync_interval=soft_sync_interval,
     )
 
 
@@ -301,12 +332,17 @@ def train_single(
     dropout: float,
     tidn_dim: int,
     tidn_depth: int,
+    topology_weight: float,
+    weight_decay: float,
+    soft_sync_interval: int,
+    updates_per_step: int,
     tag: str = "",
 ) -> Dict:
     env = gym.make("CartPole-v1")
     agent = _make_agent(
         arch, device, seed, lr, target_update_freq, epsilon_decay,
         soft_tau, dropout, tidn_dim, tidn_depth,
+        topology_weight, weight_decay, soft_sync_interval,
     )
     replay: Deque = deque(maxlen=100000)
 
@@ -331,14 +367,17 @@ def train_single(
             obs = next_obs
 
         if len(replay) >= learning_start:
-            idx = np.random.choice(len(replay), size=batch_size, replace=False)
-            batch = [replay[i] for i in idx]
-            states, actions, rewards, next_states, dones = map(
-                np.stack, zip(*batch)
-            )
-            loss, td_error = agent.update(states, actions, rewards, next_states, dones)
-            metrics["loss"].append(loss)
-            metrics["td_error"].append(td_error)
+            for _ in range(updates_per_step):
+                idx = np.random.choice(len(replay), size=batch_size, replace=False)
+                batch = [replay[i] for i in idx]
+                states, actions, rewards, next_states, dones = map(
+                    np.stack, zip(*batch)
+                )
+                loss, td_error = agent.update(
+                    states, actions, rewards, next_states, dones
+                )
+                metrics["loss"].append(loss)
+                metrics["td_error"].append(td_error)
 
         if (step + 1) % eval_interval == 0:
             eval_reward = evaluate(agent)
@@ -388,6 +427,11 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--tidn-dim", type=int, default=64)
     parser.add_argument("--tidn-depth", type=int, default=2)
+    parser.add_argument("--topology-weight", type=float, default=0.0)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--soft-sync-interval", type=int, default=0,
+                        help="Hard resync every N steps on top of soft updates")
+    parser.add_argument("--updates-per-step", type=int, default=1)
     parser.add_argument("--tag", default="", help="Prefix for result filenames (sweeps)")
     args = parser.parse_args()
 
@@ -418,6 +462,10 @@ def main():
             dropout=args.dropout,
             tidn_dim=args.tidn_dim,
             tidn_depth=args.tidn_depth,
+            topology_weight=args.topology_weight,
+            weight_decay=args.weight_decay,
+            soft_sync_interval=args.soft_sync_interval,
+            updates_per_step=args.updates_per_step,
             tag=args.tag,
         )
 
