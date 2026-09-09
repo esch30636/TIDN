@@ -322,6 +322,49 @@ Combined `topo01 + replay2` (topology 0.01 + 2 updates/step on the lr 3e-4 + sof
 - The two seeds also expose **high run-to-run variance** (best 166 vs 500 for identical hyperparameters), so the single-seed rankings from rounds 1–3 are suggestive, not definitive — worth reporting with means over ≥3 seeds before paper claims.
 - Practical recipe from the whole CartPole line: **lr 3e-4 + soft τ=0.01, plus one stabilizer — either topology 0.01 or 2 updates/step, not both.**
 
+### 2026-09-09 — TIDN Compute Overhaul: 8.4× faster updates, 8.9× less VRAM
+
+Profile-driven rewrite of the TIDN hot path (RTX 4060 Laptop, DQN encoder, BF16 AMP). Kernel-level profiling showed forward 41 ms / backward 70 ms and 5,652 MB peak VRAM at batch 384, dominated by four problems:
+
+1. **Fisher-Rao distances recomputed 6× per forward** — 3 layers × (full-batch + sample-0 variants), all on layer-invariant μ/σ (lift runs once), 3 of them dead (SimpleMessagePassing ignores `distances`). Each call materialized ~15 (b, n, n, d) fp32 intermediates ≈ 1.4 GB/layer.
+2. **Resonance aggregation via topk+gather** materializing (b, n, n, d) ≈ 708 MB/layer, with a full-row sort — and sorting the wrong axis (see semantics note below).
+3. **Dual flow dead chain**: refine/predictions/pred-errors computed and discarded (TIDN consumes only `refined[0]`), plus 4 GPU→CPU syncs per forward for constant t₀/t₁.
+4. ~800 autocast dtype-cast kernels per forward (elementwise-bound code, no tensor cores).
+
+**Fixes**:
+- `pairwise_fisher_distance_batched()` (`tidn/layers/geometry.py`): GEMM decomposition of the symmetric-KL distance (bmm identities for trace/mahalanobis, outer-product log-ratio). No (b, n, n, d) intermediates, tensor-core friendly, zeroed diagonal. Computed **once per forward** and shared across layers (`TIDN.forward` → `ResonanceRouting.forward(distances=...)`).
+- Resonance pathway → `bmm(adjacency, content)` (`tidn/core/holographic.py`): exact per-node weighted neighbour sum when k ≥ n.
+- Dual flow fast path (`tidn/core/dual_flow.py`): `compute_predictions=False` skips the unused top-down chain; t₀/t₁ passed as plain floats (4 syncs → 0).
+- Slim Atari defaults (`examples/dqn_atari/agent.py`, `train.py`): dim 192→128, depth 3→2, ode_steps 2→1, mera_depth 2→1. New flags: `--tidn-dim`, `--tidn-depth`, `--ode-steps`, `--mera-depth`.
+
+**Results** (DQN update, batch 128 / 384):
+
+| Metric | Before | After | Change |
+|--------|-------:|------:|-------:|
+| Update time @ batch 128 | 180.4 ms | 21.5 ms | **8.4×** |
+| Update time @ batch 384 | 576.7 ms | 42.5 ms | **13.6×** |
+| Peak VRAM @ 384 (fwd+bwd) | 5,652 MB | 637 MB | **8.9×** |
+| Parameters | 4,821,203 | 1,023,214 | 4.7× |
+| TIDN / CNN update ratio @128 | 22.7× | **2.65×** | — |
+| Atari smoke test (2000 steps) | 11.5 min | 91 s | 7.6× |
+
+Code-only gain (old config, new code): 180.4 → 36.0 ms @128 (**5.0×**, architecture untouched). 200k-step projection at 16 updates/step: ~160 h → ~19 h (CNN ≈ 7 h).
+
+**Learning verification** (CartPole, lr 3e-4 + soft τ 0.01 + topology 0.01, seed 42, same config pre/post):
+
+| Metric | pre (old code) | post (new code) |
+|--------|---------------:|----------------:|
+| Best eval | 210 | 213 |
+| Min eval (floor) | 30 | 34 |
+| Solved (≥195) | ✓ | ✓ |
+| Wall time | 1,108 s | 865 s (1.28×) |
+
+Learning behavior is preserved: same best-score level, slightly higher floor, identical oscillation pattern (differences within the documented run-to-run variance). The topology regularizer runs unchanged in this comparison.
+
+**Semantics note (breaking)**: the resonance pathway previously sorted `topk(dim=1)` — a rank-permuted aggregation indexed by rank, not by node. The bmm rewrite restores the intended per-node weighted neighbour sum. Model outputs differ from pre-2026-09-09 checkpoints: **retrain, don't resume**.
+
+**Tests**: 46 passing — 40 existing + 6 new equivalence tests pinning the GEMM distance against the broadcast reference and the bmm aggregation against a corrected gather reference (`tests/test_geometry_batched.py`).
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
