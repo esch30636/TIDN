@@ -69,12 +69,19 @@ class ResonanceRouting(nn.Module):
         mu: torch.Tensor,
         sigma_diag: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        distances: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             mu: (batch, n, d) distribution means
             sigma_diag: (batch, n, d) distribution variances
             mask: (batch, n) optional padding mask (True = valid)
+            distances: (batch, n, n) precomputed pairwise Fisher-Rao
+                distances. When provided, the distance computation is
+                skipped entirely (mu/sigma are then only used for shape).
+                Callers whose manifold statistics do not change between
+                layers (e.g. TIDN) should compute the matrix once and share
+                it — it is the same input every time.
 
         Returns:
             adjacency: (batch, n, n) resonance weights (differentiable)
@@ -88,7 +95,9 @@ class ResonanceRouting(nn.Module):
             batch_mask = mask.unsqueeze(1) & mask.unsqueeze(2)  # (b, n, n)
 
         # Build resonance graph
-        if n >= self.n_approx_thresh and self.use_approximate:
+        if distances is not None:
+            adjacency = self.graph_builder(distances, mask=batch_mask)
+        elif n >= self.n_approx_thresh and self.use_approximate:
             adjacency = self.approximate(mu, sigma_diag, self.graph_builder)
         else:
             # Exact pairwise distances

@@ -39,6 +39,7 @@ from tidn.core.holographic import (
 from tidn.core.mera import MERATree
 from tidn.core.dual_flow import DualFlowDynamics
 from tidn.core.topology import TopologyRegularizer, TopologyMonitor
+from tidn.layers.geometry import pairwise_fisher_distance_batched
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +163,7 @@ class TIDNLayer(nn.Module):
         sigma_diag: torch.Tensor,
         content: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        distances: Optional[torch.Tensor] = None,
     ) -> Dict:
         """
         Args:
@@ -169,36 +171,23 @@ class TIDNLayer(nn.Module):
             sigma_diag: (b, n, manifold_dim) variances
             content: (b, n, dim) token content vectors
             mask: (b, n) optional padding mask
+            distances: (b, n, n) precomputed pairwise Fisher-Rao distances,
+                shared across layers (the manifold statistics are identical
+                in every layer). Passed through to resonance routing and the
+                message passing.
 
         Returns:
             output dict with updated tensors and diagnostics
         """
         # 1. Resonance routing
-        adjacency, cluster_ids, threshold = self.resonance(mu, sigma_diag, mask)
+        adjacency, cluster_ids, threshold = self.resonance(
+            mu, sigma_diag, mask, distances=distances
+        )
 
         # 2. Holographic message passing
-        # Compute pairwise Fisher-Rao distances for per-edge resonance keys.
-        # These distances encode the relational structure: closer tokens on the
-        # statistical manifold get more similar binding keys.
-        from tidn.layers.geometry import pairwise_fisher_distance
-
-        n = mu.shape[1]
-        if n <= 128:
-            # Compute exact pairwise distances for the full batch
-            distances = pairwise_fisher_distance(mu[0], sigma_diag[0])
-            distances = distances.unsqueeze(0)  # (1, n, n)
-            if mu.shape[0] > 1:
-                # Extend to full batch (shared distance structure for now)
-                distances = distances.expand(mu.shape[0], -1, -1)
-        else:
-            # Subsample for distance-based keys on long sequences
-            idx = torch.randperm(n, device=mu.device)[:128]
-            mu_subset = mu[:, idx, :]
-            s_subset = sigma_diag[:, idx, :]
-            distances = torch.zeros(mu.shape[0], n, n, device=mu.device)
-            dist_subset = pairwise_fisher_distance(mu_subset[0], s_subset[0])
-            distances[0, :128, :128] = dist_subset
-
+        # The pairwise Fisher-Rao distances encode the relational structure
+        # for per-edge resonance keys; they are computed once per forward in
+        # TIDN.forward and shared here.
         msg_result = self.message_pass(content, adjacency, distances=distances)
         if isinstance(msg_result, tuple):
             updated_content, _keys = msg_result
@@ -298,13 +287,21 @@ class TIDN(nn.Module):
         # Step 1: Lift to statistical manifold
         mu, sigma_diag, _ = self.lift(x)
 
+        # Pairwise Fisher-Rao distances are computed ONCE per forward:
+        # mu/sigma come from a single lift and are passed through every
+        # layer unchanged, so per-layer recomputation (3x) was fully
+        # redundant. GEMM-formulated to avoid (b, n, n, d) intermediates.
+        pairwise_distances = pairwise_fisher_distance_batched(mu, sigma_diag)
+
         # Step 2: Process through TIDN layers
         content = x  # Start from raw embeddings for content
         adjacencies = []
         all_outputs = []
 
         for layer in self.layers:
-            result = layer(mu, sigma_diag, content, mask)
+            result = layer(
+                mu, sigma_diag, content, mask, distances=pairwise_distances
+            )
             mu = result["mu"]
             sigma_diag = result["sigma_diag"]
             content = result["content"]

@@ -152,48 +152,56 @@ class DualFlowDynamics(nn.Module):
     def forward(
         self,
         coarse_levels: List[torch.Tensor],
+        compute_predictions: bool = False,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         """
         Args:
             coarse_levels: forward states from MERATree
                            coarse_levels[0] = input (finest)
                            coarse_levels[l] = level-l coarse representation
+            compute_predictions: if True, also run the top-down prediction
+                chain (refine layers + prediction errors). Those outputs are
+                diagnostic-only — TIDN consumes just refined_levels[0] — so
+                they are skipped by default.
 
         Returns:
             refined_levels: corrected forward states
-            predictions: top-down predictions at each level
-            pred_errors: prediction error magnitudes at each level
+            predictions: top-down predictions at each level ([] when skipped)
+            pred_errors: prediction error magnitudes ([] when skipped)
         """
         n_levels = len(coarse_levels) - 1  # Number of MERA transitions
-        batch = coarse_levels[0].shape[0]
-        device = coarse_levels[0].device
 
-        # Forward pass: compute forward states (already done in MERATree)
-        forward_states = coarse_levels  # [input, level1, level2, ...]
-
-        # Backward pass: generate top-down predictions
-        backward_states = [None] * (n_levels + 1)
-
-        # Start from coarsest level (no top-down input)
-        backward_states[-1] = forward_states[-1].detach()
-
+        # ODE-based refinement: continuous-time correction of the forward
+        # states. dz/dt = f_forward(z) + γ · (prediction - z); the coupling
+        # term is currently inactive (each integrator integrates f_forward
+        # only), so the prediction chain has no effect on the refined states.
+        # Integration times are constants — pass plain floats instead of
+        # device tensors to avoid GPU->CPU syncs on every forward.
         refined_states = [None] * (n_levels + 1)
-        refined_states[-1] = forward_states[-1]
+        refined_states[-1] = coarse_levels[-1]
 
+        if not compute_predictions:
+            for l in reversed(range(n_levels)):
+                refined_states[l] = self.ode_integrators[l](
+                    coarse_levels[l], 0.0, 1.0
+                )
+            return refined_states, [], []
+
+        # Full predictive-coding pass (diagnostic path)
         all_predictions = []
         all_pred_errors = []
 
         # Process from top to bottom
         for l in reversed(range(n_levels)):
-            coarse = forward_states[l + 1]  # Upper level
-            fine_target_len = forward_states[l].shape[1]
+            coarse = coarse_levels[l + 1]  # Upper level
+            fine_target_len = coarse_levels[l].shape[1]
 
             # Generate top-down prediction
             prediction = self.refine[l](coarse, fine_target_len)
             all_predictions.insert(0, prediction)
 
             # Compute prediction error
-            actual = forward_states[l]
+            actual = coarse_levels[l]
             pred_error_raw = actual - prediction
 
             # Weighted prediction error
@@ -202,12 +210,6 @@ class DualFlowDynamics(nn.Module):
 
             all_pred_errors.insert(0, weighted_error.norm(dim=-1).mean())
 
-            # ODE-based refinement: continuous-time correction
-            # dz/dt = f_forward(z) + γ · (prediction - z)
-            t0 = torch.tensor(0.0, device=device)
-            t1 = torch.tensor(1.0, device=device)
-
-            refined = self.ode_integrators[l](actual, t0.item(), t1.item())
-            refined_states[l] = refined
+            refined_states[l] = self.ode_integrators[l](actual, 0.0, 1.0)
 
         return refined_states, all_predictions, all_pred_errors

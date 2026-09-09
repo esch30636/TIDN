@@ -267,15 +267,21 @@ class SimpleMessagePassing(nn.Module):
         # ---- Pathway 2: Resonance-guided aggregation ----
         # For small n, use all edges (gradient flows to all)
         k_res = n  # full adjacency for small sequences
-        res_weights, res_indices = adjacency.topk(k_res, dim=1)  # (b, n, n)
+        if k_res >= n:
+            # Every edge contributes, so the weighted sum over neighbours is
+            # exactly a batched matmul. This avoids the full-row topk sort
+            # and the materialization of the (b, n, n, d) gathered tensor.
+            res_out = torch.bmm(adjacency, content)  # (b, n, d)
+        else:
+            res_weights, res_indices = adjacency.topk(k_res, dim=1)  # (b, n, k)
 
-        src_gathered = torch.gather(
-            content.unsqueeze(1).expand(-1, n, -1, -1),
-            2,
-            res_indices.unsqueeze(-1).expand(-1, -1, -1, d),
-        )  # (b, n, n, d)
+            src_gathered = torch.gather(
+                content.unsqueeze(1).expand(-1, n, -1, -1),
+                2,
+                res_indices.unsqueeze(-1).expand(-1, -1, -1, d),
+            )  # (b, n, k, d)
 
-        res_out = (src_gathered * res_weights.unsqueeze(-1)).sum(dim=2)  # (b, n, d)
+            res_out = (src_gathered * res_weights.unsqueeze(-1)).sum(dim=2)  # (b, n, d)
 
         # ---- Combine both pathways ----
         gate_val = self.gate.sigmoid()  # learnable blend

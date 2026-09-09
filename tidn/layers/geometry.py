@@ -247,6 +247,72 @@ def pairwise_fisher_distance(
     return fisher_rao_distance_gaussian(mu_i, s_i, mu_j, s_j, method=method)
 
 
+def pairwise_fisher_distance_batched(
+    mu: torch.Tensor,
+    sigma_diag: torch.Tensor,
+    method: str = "symmetric-kl",
+) -> torch.Tensor:
+    """Pairwise Fisher-Rao distances for a batch of sequences, GEMM-formulated.
+
+    Mathematically identical to broadcasting (b, n, 1, d) x (b, 1, n, d)
+    through :func:`fisher_rao_distance_gaussian` with method="symmetric-kl",
+    but avoids materializing (b, n, n, d) intermediates: every sum over the
+    manifold dimension is expressed as a batched matmul (tensor-core
+    friendly) plus outer-product terms on (b, n, n) only. The same clamps
+    (1e-8 variance floor, +1e-10 sqrt stabilizer) are preserved.
+
+    KL identities used (p = index i, q = index j, diagonal Gaussians):
+        log_ratio[i,j] = sum_d log(var_i,d) - log(var_j,d)          (outer diff)
+        trace_12[i,j]  = sum_d var_i,d / var_j,d                    (bmm)
+        mahal_12[i,j]  = sum_d (mu_i,d - mu_j,d)^2 / var_j,d        (3 bmm terms)
+        kl_21 = transpose(kl_12 terms), since the reverse direction swaps i/j
+
+    Args:
+        mu: (b, n, d) mean vectors
+        sigma_diag: (b, n, d) diagonal variances
+        method: distance approximation method (only "symmetric-kl" supported)
+
+    Returns:
+        D: (b, n, n) pairwise distance matrix
+    """
+    if method != "symmetric-kl":
+        raise NotImplementedError(
+            f"Batched fast path only supports 'symmetric-kl', got {method}"
+        )
+
+    var1 = sigma_diag.clamp(min=1e-8)  # (b, n, d)
+    d = mu.shape[-1]
+
+    log_var_sum = var1.log().sum(dim=-1)  # (b, n)
+    log_var_ratio = log_var_sum[:, :, None] - log_var_sum[:, None, :]  # (b, n, n)
+
+    var_inv = 1.0 / var1  # (b, n, d)
+    trace_12 = torch.bmm(var1, var_inv.transpose(1, 2))  # (b, n, n)
+
+    mu_sq = mu * mu
+    r = (mu_sq * var_inv).sum(dim=-1)  # (b, n): sum_d mu_d^2 / var_d
+    mahal_12 = (
+        torch.bmm(mu_sq, var_inv.transpose(1, 2))
+        - 2.0 * torch.bmm(mu, (mu * var_inv).transpose(1, 2))
+        + r[:, None, :]
+    )  # (b, n, n)
+
+    kl_12 = 0.5 * (trace_12 - d + mahal_12 - log_var_ratio)
+    # Reverse direction: swapping p/q transposes each term of kl_12
+    kl_21 = 0.5 * (
+        trace_12.transpose(1, 2) - d + mahal_12.transpose(1, 2) + log_var_ratio
+    )
+
+    js_div = 0.5 * (kl_12 + kl_21)
+    dist = torch.sqrt(js_div.clamp(min=0) + 1e-10)
+    # bmm computes x * (1/x) rather than x / x, leaving ~1e-6 rounding on the
+    # diagonal; self-distance is exactly 0, so zero it explicitly.
+    return dist.masked_fill(
+        torch.eye(mu.shape[1], device=mu.device, dtype=torch.bool).unsqueeze(0),
+        0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Natural Gradient
 # ---------------------------------------------------------------------------
