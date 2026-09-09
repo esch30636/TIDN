@@ -121,9 +121,11 @@ class TIDNDQN(nn.Module):
     def __init__(
         self,
         num_actions: int,
-        dim: int = 192,
+        dim: int = 128,
         patch_size: int = 12,
-        tidn_depth: int = 3,
+        tidn_depth: int = 2,
+        ode_steps: int = 1,
+        mera_depth: int = 1,
     ):
         super().__init__()
         self.num_actions = num_actions
@@ -139,7 +141,9 @@ class TIDNDQN(nn.Module):
             torch.randn(1, self.grid_size * self.grid_size, dim) * 0.02
         )
 
-        # TIDN core
+        # TIDN core. Slim defaults (dim=128, depth=2, ode_steps=1) were chosen
+        # for training throughput on a laptop GPU (RTX 4060); larger configs
+        # remain selectable via constructor args.
         tidn_config = TIDNConfig(
             dim=dim,
             depth=tidn_depth,
@@ -148,9 +152,9 @@ class TIDNDQN(nn.Module):
             num_heads=4,
             resonance_threshold=0.3,
             top_k_edges=16,
-            mera_depth=2,
+            mera_depth=mera_depth,
             mera_group_size=2,
-            ode_steps=2,
+            ode_steps=ode_steps,
             topology_weight=0.0,
             use_simple_passing=True,
             use_sparse_passing=False,

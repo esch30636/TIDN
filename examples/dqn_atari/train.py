@@ -55,6 +55,10 @@ def train(
     verbose: bool = True,
     compile_model: bool = False,
     use_amp: bool = True,
+    tidn_dim: int = 128,
+    tidn_depth: int = 2,
+    ode_steps: int = 1,
+    mera_depth: int = 1,
 ) -> Dict:
     """Train DQN agent(s) on Atari.
 
@@ -106,6 +110,8 @@ def train(
             target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
             compile_model=compile_model, use_amp=use_amp,
+            tidn_dim=tidn_dim, tidn_depth=tidn_depth, ode_steps=ode_steps,
+            mera_depth=mera_depth,
         )
         results["cnn"] = cnn_results
 
@@ -120,6 +126,8 @@ def train(
             target_update,
             gamma, epsilon_decay, lr, seed, save_dir, render, verbose, device,
             compile_model=compile_model, use_amp=use_amp,
+            tidn_dim=tidn_dim, tidn_depth=tidn_depth, ode_steps=ode_steps,
+            mera_depth=mera_depth,
         )
         results["tidn"] = tidn_results
 
@@ -155,6 +163,10 @@ def _train_single(
     device: torch.device,
     compile_model: bool = False,
     use_amp: bool = True,
+    tidn_dim: int = 128,
+    tidn_depth: int = 2,
+    ode_steps: int = 1,
+    mera_depth: int = 1,
 ) -> Dict:
     """Train a single architecture variant."""
 
@@ -166,7 +178,13 @@ def _train_single(
     if arch_name == "cnn":
         q_net = NatureCNN(num_actions)
     else:
-        q_net = TIDNDQN(num_actions)
+        q_net = TIDNDQN(
+            num_actions,
+            dim=tidn_dim,
+            tidn_depth=tidn_depth,
+            ode_steps=ode_steps,
+            mera_depth=mera_depth,
+        )
 
     param_count = sum(p.numel() for p in q_net.parameters())
     if verbose:
@@ -468,6 +486,22 @@ def main():
         "--replay-capacity", type=int, default=100000,
         help="Replay buffer capacity",
     )
+    parser.add_argument(
+        "--tidn-dim", type=int, default=128,
+        help="TIDN token dimension (default: 128)",
+    )
+    parser.add_argument(
+        "--tidn-depth", type=int, default=2,
+        help="Number of TIDN layers (default: 2)",
+    )
+    parser.add_argument(
+        "--ode-steps", type=int, default=1,
+        help="Dual-flow ODE integration steps (default: 1)",
+    )
+    parser.add_argument(
+        "--mera-depth", type=int, default=1,
+        help="MERA hierarchy depth (default: 1)",
+    )
 
     args = parser.parse_args()
 
@@ -488,6 +522,10 @@ def main():
         render=args.render,
         compile_model=not args.no_compile,
         use_amp=not args.no_amp,
+        tidn_dim=args.tidn_dim,
+        tidn_depth=args.tidn_depth,
+        ode_steps=args.ode_steps,
+        mera_depth=args.mera_depth,
     )
 
 
