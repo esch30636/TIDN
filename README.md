@@ -365,6 +365,34 @@ Learning behavior is preserved: same best-score level, slightly higher floor, id
 
 **Tests**: 46 passing — 40 existing + 6 new equivalence tests pinning the GEMM distance against the broadcast reference and the bmm aggregation against a corrected gather reference (`tests/test_geometry_batched.py`).
 
+### 2026-09-10 — Atari Equal-Budget Run, VSA Pathway RL Validation, Topology Ground-Truth Tests
+
+**Atari same-budget comparison** (Pong, 60k steps, 16 updates/step, batch 128, seed 42 — full config in `results/dqn_atari/equal_budget_20260910/comparison.json`):
+
+| Metric | TIDN (slim) | Nature CNN |
+|--------|------------:|-----------:|
+| Parameters | 1,023,214 | 3,510,086 |
+| Updates completed | 788,200 (91%) | 725,000 |
+| ms/update in-run (incl. env+replay) | 27.5 | 17.4 (**1.58×**) |
+| Eval 10k/20k/30k/40k/50k steps | -21 ×5 | -21 ×5 |
+
+Both architectures stay at the random floor (-21) at all five matched evals — confirming the 08-18 finding that Pong needs ≫1M updates at this recipe. The interesting part is the cost: TIDN now trains at **1.58× CNN's wall clock while carrying 29% of its parameters** (pure-compute ratio 2.65× from the 09-09 bench; the in-run gap narrows because env/replay overhead is shared). Both runs were interrupted (TIDN at 91% by session teardown, CNN deliberately stopped after the 50k-step eval); the new per-eval result checkpointing in `train.py` preserved every curve — no data lost. Loss arrays in the committed JSONs are decimated 1:50.
+
+**VSA pathway RL validation** (CartPole, lr 3e-4 + soft τ 0.01 + topology 0.01, `--vsa` = `use_simple_passing=False` → full `HolographicMessagePassing`):
+
+| Config | Seed | Best | Final | Floor | Solved |
+|--------|-----:|-----:|------:|------:|:------:|
+| VSA | 42 | **500** | **500** | 21 | ✓ |
+| VSA | 123 | 295 | 103 | 82 | ✓ |
+| Simple passing (baseline) | 42 | 213 | 93 | 34 | ✓ |
+| Simple passing (baseline) | 123 | 500 | 119 | 21 | ✓ |
+
+The flagship holographic bind/superpose pathway **solves CartPole** and lands in the same band as the simple-passing baseline; seed variance dominates the differences, and both pathways keep the characteristic late-training oscillation. First RL validation of the VSA pathway. Also fixed a latent bug: `circular_correlation` was never imported in `holographic.py` (`unbind_component` would `NameError`).
+
+**Topology semantics tests** (17 new, 63 total green — `tests/test_topology_semantics.py`): the vectorized regularizer is now pinned against exact graph homology (BFS components + cycle rank E−V+β0, no external persistence library). Findings documented as semantics: `h0_counts = n − β0` exactly (nullity theorem on random graphs); the H1 proxy is **spectral diversity** (consecutive eigenvalue gaps), not literal Betti-1 — trees can outscore cycles (P5→4 vs C4→2); isolated vertices degenerate (degree clamp → Laplacian = I, h0 = n).
+
+**CLI additions**: `--epsilon-decay` in the Atari trainer; `--vsa` in the CartPole trainer.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
