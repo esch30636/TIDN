@@ -36,6 +36,7 @@ from tidn.layers.vsa import (
     VSASuperpose,
     VSAUnbind,
     circular_convolution,
+    circular_correlation,
     superposition,
 )
 

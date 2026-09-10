@@ -82,6 +82,7 @@ class TIDNQNet(nn.Module):
         depth: int = 2,
         dropout: float = 0.0,
         topology_weight: float = 0.0,
+        use_simple_passing: bool = True,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -102,7 +103,7 @@ class TIDNQNet(nn.Module):
             mera_group_size=2,
             ode_steps=2,
             topology_weight=topology_weight,
-            use_simple_passing=True,
+            use_simple_passing=use_simple_passing,
             use_sparse_passing=False,
             use_clustering=False,
             dropout=dropout,
@@ -292,6 +293,7 @@ def _make_agent(
     topology_weight: float,
     weight_decay: float,
     soft_sync_interval: int,
+    use_simple_passing: bool,
 ) -> DQNAgent:
     if arch == "mlp":
         q_net = MLPQNet(obs_dim=4, num_actions=2)
@@ -299,6 +301,7 @@ def _make_agent(
         q_net = TIDNQNet(
             obs_dim=4, num_actions=2, dim=tidn_dim, depth=tidn_depth,
             dropout=dropout, topology_weight=topology_weight,
+            use_simple_passing=use_simple_passing,
         )
     else:
         raise ValueError(f"unknown arch: {arch}")
@@ -336,6 +339,7 @@ def train_single(
     weight_decay: float,
     soft_sync_interval: int,
     updates_per_step: int,
+    use_simple_passing: bool,
     tag: str = "",
 ) -> Dict:
     env = gym.make("CartPole-v1")
@@ -343,6 +347,7 @@ def train_single(
         arch, device, seed, lr, target_update_freq, epsilon_decay,
         soft_tau, dropout, tidn_dim, tidn_depth,
         topology_weight, weight_decay, soft_sync_interval,
+        use_simple_passing,
     )
     replay: Deque = deque(maxlen=100000)
 
@@ -432,6 +437,11 @@ def main():
     parser.add_argument("--soft-sync-interval", type=int, default=0,
                         help="Hard resync every N steps on top of soft updates")
     parser.add_argument("--updates-per-step", type=int, default=1)
+    parser.add_argument(
+        "--vsa",
+        action="store_true",
+        help="Use the holographic VSA message passing (use_simple_passing=False)",
+    )
     parser.add_argument("--tag", default="", help="Prefix for result filenames (sweeps)")
     args = parser.parse_args()
 
@@ -466,6 +476,7 @@ def main():
             weight_decay=args.weight_decay,
             soft_sync_interval=args.soft_sync_interval,
             updates_per_step=args.updates_per_step,
+            use_simple_passing=not args.vsa,
             tag=args.tag,
         )
 
