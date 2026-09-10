@@ -283,6 +283,23 @@ def _train_single(
                 best_eval_reward = eval_reward
                 agent.save(os.path.join(save_dir, f"{arch_name}_best.pt"))
 
+            # Checkpoint partial results so an interrupted run keeps its data
+            _save_result(
+                {
+                    "arch": arch_name,
+                    "game": game,
+                    "total_steps": total_steps,
+                    "param_count": param_count,
+                    "best_eval_reward": float(best_eval_reward),
+                    "final_eval_reward": float(eval_reward),
+                    "episodes_completed": episode_count,
+                    "metrics": {k: v for k, v in metrics.items()},
+                    "partial": True,
+                },
+                save_dir,
+                arch_name,
+            )
+
     env.close()
 
     # Final evaluation
@@ -300,12 +317,20 @@ def _train_single(
     }
 
     # Save results
-    with open(os.path.join(save_dir, f"{arch_name}_results.json"), "w") as f:
-        json.dump(result, f, indent=2, default=_json_default)
+    _save_result(result, save_dir, arch_name)
 
     agent.save(os.path.join(save_dir, f"{arch_name}_final.pt"))
 
     return result
+
+
+def _save_result(result: Dict, save_dir: str, arch_name: str) -> None:
+    """Write (possibly partial) training results to JSON.
+
+    Called after every evaluation so an interrupted run keeps its curves.
+    """
+    with open(os.path.join(save_dir, f"{arch_name}_results.json"), "w") as f:
+        json.dump(result, f, indent=2, default=_json_default)
 
 
 def evaluate(
