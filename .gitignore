@@ -54,3 +54,6 @@ htmlcov/
 
 # Example-level run artifacts (smoke tests); real experiments live in top-level results/
 examples/dqn_atari/results/
+
+# Model checkpoints stay local; results JSON/PNG are committed
+results/**/*.pt

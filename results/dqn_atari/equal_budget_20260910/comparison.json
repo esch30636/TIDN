@@ -1,0 +1,46 @@
+{
+  "date": "2026-09-10",
+  "config": {
+    "game": "PongNoFrameskip-v4",
+    "total_steps": 60000,
+    "learning_start": 6000,
+    "updates_per_step": 16,
+    "batch_size": 128,
+    "seed": 42,
+    "epsilon_decay": 200000
+  },
+  "tidn": {
+    "param_count": 1023214,
+    "updates_completed": 788200,
+    "env_steps_reached": 55262,
+    "wall_seconds": 21633,
+    "ms_per_update": 27.45,
+    "evals": {
+      "10000": -21.0,
+      "20000": -21.0,
+      "30000": -21.0,
+      "40000": -21.0,
+      "50000": -21.0
+    },
+    "note": "killed by session teardown at 91% of updates; evals through 50k steps"
+  },
+  "cnn": {
+    "param_count": 3510086,
+    "updates_completed": 725000,
+    "env_steps_reached": 51324,
+    "wall_seconds": 12596,
+    "ms_per_update": 17.37,
+    "evals": {
+      "10000": -21.0,
+      "20000": -21.0,
+      "30000": -21.0,
+      "40000": -21.0,
+      "50000": -21.0
+    },
+    "note": "stopped early after the 50k-step eval; matched eval points complete"
+  },
+  "head_to_head": {
+    "speed_ratio_tidn_cnn": 1.58,
+    "matched_evals_all_random_floor": true
+  }
+}
