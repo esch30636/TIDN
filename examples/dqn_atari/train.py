@@ -512,6 +512,10 @@ def main():
         help="Replay buffer capacity",
     )
     parser.add_argument(
+        "--epsilon-decay", type=int, default=200000,
+        help="Epsilon exponential decay constant (steps)",
+    )
+    parser.add_argument(
         "--tidn-dim", type=int, default=128,
         help="TIDN token dimension (default: 128)",
     )
@@ -539,6 +543,7 @@ def main():
         batch_size=args.batch_size,
         replay_capacity=args.replay_capacity,
         learning_start=args.learning_start,
+        epsilon_decay=args.epsilon_decay,
         updates_per_step=args.updates_per_step,
         gamma=args.gamma,
         lr=args.lr,
